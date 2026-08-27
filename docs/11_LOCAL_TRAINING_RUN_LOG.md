@@ -181,17 +181,36 @@ EfficientNet-B0 with ImageNet initialisation** — a valid negative result, give
 itself reaches 99.89%. Do not present `full` as the best variant; on Dataset B it is not.
 See `docs/09_PROJECT_STATUS_REPORT.md` §6.7 for what a proper test would require.
 
-### 4.4 Synthetic defect classifier (4 classes, 630-image test split)
-Test accuracy **99.68%**, macro-F1 0.9968. Per class:
+### 4.4 Synthetic defect classifier (4 classes, 624-image test split, group-split)
+Test accuracy **99.20%**, macro-F1 0.9920. Per class:
 
 | Class | Precision | Recall | F1 | Support |
 |---|---|---|---|---|
-| healthy | 0.988 | 1.000 | 0.994 | 158 |
-| cracked | 1.000 | 0.987 | 0.994 | 158 |
-| discolored_mold | 1.000 | 1.000 | 1.000 | 157 |
-| insect_damaged | 1.000 | 1.000 | 1.000 | 157 |
+| healthy | 0.969 | 1.000 | 0.984 | 156 |
+| cracked | 1.000 | 0.968 | 0.984 | 156 |
+| discolored_mold | 1.000 | 1.000 | 1.000 | 156 |
+| insect_damaged | 1.000 | 1.000 | 1.000 | 156 |
 
-Only 2 errors, both thin-crack images read as healthy.
+**Re-trained 2026-08-27 after fixing a split defect.** The original split was
+row-level stratified. Every source kernel produces four rows here -- the untouched
+original as `healthy` plus one painted variant per defect class -- so the same
+physical kernel appeared in train as `healthy` and in test as `cracked`. That is the
+same provenance leakage that inflated the Dataset B variety numbers (section 6.9), and the
+fix is the same: `make_split_indices` now deals out whole SOURCE SEEDS via
+`src.data.group_split.split_groups`, stratified by source variety. Zero source
+overlap between any two splits, verified.
+
+The number barely moved: **99.68% -> 99.20%**. That is itself the finding. The old
+score was not mostly leakage; the task is simply easy, because an OpenCV-painted
+crack is a far more separable thing than a real fracture. It makes the caveat below
+stronger, not weaker -- fixing the leak did not reveal a hidden weakness, it
+confirmed that this metric was never measuring real defect detection in the first
+place.
+
+
+All 5 errors are cracked kernels read as healthy -- the thin-crack failure mode
+survived the re-train, which is consistent with a 1-2px stroke being near the
+measurable floor (see `outputs/metrics/segmentation_resolution_floor.json`).
 
 **This number must be reported with its caveat.** ~99.7% here is the *expected* result
 and is not evidence of real defect-detection capability: the model is being asked to

@@ -66,3 +66,60 @@ def test_generate_synthetic_dataset_manifest_matches_disk(tmp_path):
     assert len(healthy_rows) == 3
     for r in healthy_rows:
         assert r["synthetic_image_path"] == r["source_image"]
+
+
+def test_reconstructed_masks_mark_pixels_that_actually_changed():
+    """A mask is only ground truth if it agrees with what the painter did. For every
+    defect class, the pixels the mask claims must be pixels the generator really
+    altered -- otherwise we would be shipping a mask that looks plausible but marks
+    the wrong region, which is exactly the fabrication the project forbids.
+    """
+    from src.data.synthetic_defect_generator import reconstruct_defect_mask, GENERATORS
+
+    img = _fake_seed_image()
+    for cls, gen_fn in GENERATORS.items():
+        rng = random.Random(7)
+        out, params = gen_fn(img, rng)
+        mask = reconstruct_defect_mask(img, cls, params)
+
+        assert mask.shape == img.shape[:2]
+        assert set(np.unique(mask)).issubset({0, 255})
+        assert mask.sum() > 0, f"{cls}: empty mask"
+
+        changed = np.any(out.astype(int) != img.astype(int), axis=2)
+        claimed = mask > 0
+        agreement = (changed & claimed).sum() / claimed.sum()
+        # not 100%: a crack drawn over an already-dark pixel can leave it unchanged,
+        # and the mould tone can coincide with the source colour.
+        assert agreement > 0.90, f"{cls}: only {agreement:.2%} of masked pixels changed"
+
+
+def test_healthy_mask_is_empty():
+    from src.data.synthetic_defect_generator import reconstruct_defect_mask
+
+    img = _fake_seed_image()
+    mask = reconstruct_defect_mask(img, "healthy", {})
+    assert mask.shape == img.shape[:2]
+    assert mask.sum() == 0
+
+
+def test_masks_are_written_and_referenced(tmp_path):
+    source_root = tmp_path / "source"
+    (source_root / "classA").mkdir(parents=True)
+    for i in range(2):
+        cv2.imwrite(str(source_root / "classA" / f"img{i}.jpg"), _fake_seed_image())
+
+    rows = generate_synthetic_dataset(
+        str(source_root / ".."/ "source"), str(tmp_path / "syn"), str(tmp_path / "m.csv"),
+        per_class_synthetic_ratio=1.0, seed=42, masks_root=str(tmp_path / "masks"),
+    )
+    defect_rows = [r for r in rows if r["synthetic_label"] != "healthy"]
+    assert defect_rows
+    for r in defect_rows:
+        assert r["defect_mask_path"], f"no mask recorded for {r['synthetic_label']}"
+        assert os.path.exists(r["defect_mask_path"])
+        m = cv2.imread(r["defect_mask_path"], cv2.IMREAD_GRAYSCALE)
+        assert m is not None and m.sum() > 0
+    for r in rows:
+        if r["synthetic_label"] == "healthy":
+            assert r["defect_mask_path"] == ""

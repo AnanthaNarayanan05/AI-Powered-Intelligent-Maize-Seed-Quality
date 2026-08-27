@@ -321,16 +321,33 @@ Dataset B is ~17× the size of Dataset A (17,713 images; 12,403 train) and was t
 | `contrastive_only` (+ contrastive pretraining) | **99.96%** | **0.9996** | **1** | +0.0008 |
 | `full` (proposed: both) | 99.92% | 0.9992 | 2 | +0.0004 |
 
-### 6.3 Synthetic defect classifier (4 classes, 630-image test split)
+### 6.3 Synthetic defect classifier (4 classes, 624-image test split, group-split)
 
-Test accuracy **99.68%**, macro-F1 0.9968. Only 2 errors, both thin-crack images read as healthy.
+Test accuracy **99.20%**, macro-F1 0.9920. All 5 errors are cracked images read as healthy.
 
 | Class | Precision | Recall | F1 | Support |
 |---|---|---|---|---|
-| healthy | 0.988 | 1.000 | 0.994 | 158 |
-| cracked | 1.000 | 0.987 | 0.994 | 158 |
-| discolored_mold | 1.000 | 1.000 | 1.000 | 157 |
-| insect_damaged | 1.000 | 1.000 | 1.000 | 157 |
+| healthy | 0.969 | 1.000 | 0.984 | 156 |
+| cracked | 1.000 | 0.968 | 0.984 | 156 |
+| discolored_mold | 1.000 | 1.000 | 1.000 | 156 |
+| insect_damaged | 1.000 | 1.000 | 1.000 | 156 |
+
+**Re-trained 2026-08-27 after fixing a split defect.** The original split was
+row-level stratified. Every source kernel produces four rows here -- the untouched
+original as `healthy` plus one painted variant per defect class -- so the same
+physical kernel appeared in train as `healthy` and in test as `cracked`. That is the
+same provenance leakage that inflated the Dataset B variety numbers (section 6.9), and the
+fix is the same: `make_split_indices` now deals out whole SOURCE SEEDS via
+`src.data.group_split.split_groups`, stratified by source variety. Zero source
+overlap between any two splits, verified.
+
+The number barely moved: **99.68% -> 99.20%**. That is itself the finding. The old
+score was not mostly leakage; the task is simply easy, because an OpenCV-painted
+crack is a far more separable thing than a real fracture. It makes the caveat below
+stronger, not weaker -- fixing the leak did not reveal a hidden weakness, it
+confirmed that this metric was never measuring real defect detection in the first
+place.
+
 
 > **This number must never be reported without its caveat.** ~99.7% here is the *expected* result and is **not** evidence of real defect-detection capability. The model is recognizing procedurally generated patterns drawn by a known OpenCV routine, so the classes are far more visually separable than real damage would be. It demonstrates that the architecture and the serving path can learn and serve a defect task. It says nothing about real-world plant pathology. See `docs/06_SYNTHETIC_DEFECT_POLICY.md`.
 

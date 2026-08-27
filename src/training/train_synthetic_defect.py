@@ -22,9 +22,9 @@ import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
 
 from src.data.datasets import SyntheticDefectDataset
+from src.data.group_split import split_groups
 from src.data.synthetic_defect_generator import SYNTHETIC_CLASSES
 from src.contrastive.simclr import build_eval_transform, build_simclr_augmentation
 from src.models.variety_classifier import CognitiveAttentionClassifier
@@ -37,16 +37,39 @@ logger = get_logger("train_synthetic_defect")
 
 
 def make_split_indices(manifest_path: str, val_split: float, test_split: float, seed: int):
+    """Split on SOURCE SEEDS, never on rows.
+
+    Every source image produces four rows here: the untouched original as `healthy`
+    plus one painted variant per defect class. A row-level stratified split therefore
+    puts `chulpi_cancha 1` in train as healthy and the very same kernel in test as
+    cracked, so the test set measures how well the model recognises kernels it has
+    already memorised rather than how well it recognises defects. This is the same
+    leakage that inflated the Dataset B variety accuracies to 99.9% (docs/09 section
+    6.9); the fix is the same one -- group by provenance and deal out whole groups.
+
+    Grouping by source image also keeps the four defect classes perfectly balanced
+    across splits for free, since each group contributes exactly one row per class.
+    Groups are stratified by the source variety class so no variety is concentrated
+    in one split.
+    """
     with open(manifest_path) as f:
         rows = list(csv.DictReader(f))
-    labels = [r["synthetic_label"] for r in rows]
-    idx = list(range(len(rows)))
 
-    train_idx, temp_idx = train_test_split(idx, test_size=val_split + test_split, stratify=labels, random_state=seed)
-    temp_labels = [labels[i] for i in temp_idx]
-    rel_test = test_split / (val_split + test_split)
-    val_idx, test_idx = train_test_split(temp_idx, test_size=rel_test, stratify=temp_labels, random_state=seed)
-    return train_idx, val_idx, test_idx
+    sources = sorted({r["source_image"] for r in rows})
+    variety_of = {r["source_image"]: r["source_variety_class"] for r in rows}
+    assignment = split_groups(
+        sources,
+        group_of=lambda src: src,
+        label_of=lambda src: variety_of[src],
+        val_frac=val_split,
+        test_frac=test_split,
+        seed=seed,
+    )
+
+    buckets = {"train": [], "val": [], "test": []}
+    for i, r in enumerate(rows):
+        buckets[assignment[r["source_image"]]].append(i)
+    return buckets["train"], buckets["val"], buckets["test"]
 
 
 def main():
