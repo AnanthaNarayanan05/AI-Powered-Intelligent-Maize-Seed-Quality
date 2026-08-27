@@ -1,14 +1,22 @@
-"""Train the pixel-level defect segmenter on SYNTHETIC defect masks.
+"""Train the pixel-level defect segmenter.
 
-    python -m src.segmentation.train_seg
+    python -m src.segmentation.train_seg                      # synthetic masks
+    python -m src.segmentation.train_seg         --manifest data_processed/manifest_segmentation_real.csv         --out-name defect_segmenter_real                      # verified real masks
 
-What the labels are, stated once and carried in the checkpoint so it cannot be
-forgotten downstream: every defect mask here was re-derived from the transformation
-parameters this project logged when it PAINTED the defect. They are exact, and they
-are synthetic. A model trained on them has learned to segment procedurally generated
-crack lines, mould blobs and bore holes. It has NOT been shown to segment real fungal
-damage, and nothing in this script licenses that claim. The checkpoint records
-label_provenance="synthetic" for exactly this reason.
+WHAT THE LABELS ARE is not decided here. It is read from the manifest's own
+`<manifest>.provenance.json` sidecar and copied into both the checkpoint and the
+metrics file, so a number can never travel further than its provenance. With no
+sidecar the default is the synthetic one: every defect mask re-derived from the
+transformation parameters this project logged when it PAINTED the defect. Those
+are exact, and they are synthetic -- a model trained on them has learned to
+segment procedurally generated crack lines, mould blobs and bore holes, and has
+NOT been shown to segment real fungal damage.
+
+Samples carry a per-channel `valid` vector (see src.segmentation.dataset). A
+channel that was never annotated for an image is excluded from the loss AND from
+every count in the metrics, because scoring a prediction against a label that
+does not exist is not evaluation. The synthetic manifest yields all-ones there,
+so its arithmetic is unchanged.
 
 Two things about the loss are deliberate:
 
@@ -55,24 +63,49 @@ SWEEP_THRESHOLDS = [round(t, 2) for t in np.arange(0.10, 0.91, 0.05)]
 MIN_REGION_PX = 8
 
 
-def dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1.0) -> torch.Tensor:
+def dice_loss(logits: torch.Tensor, target: torch.Tensor,
+              valid: torch.Tensor | None = None, eps: float = 1.0) -> torch.Tensor:
     """Soft Dice, averaged over channels. eps=1.0 in BOTH numerator and denominator so
-    an empty prediction on an empty target scores 1.0 rather than 0/0."""
+    an empty prediction on an empty target scores 1.0 rather than 0/0.
+
+    `valid` is (B, C): 1 where that channel is annotated for that image. Masked
+    samples contribute nothing to either the numerator or the denominator, so an
+    unannotated channel produces no gradient rather than a gradient toward empty.
+    """
     probs = torch.sigmoid(logits)
+    if valid is not None:
+        m = valid.view(*valid.shape, 1, 1)
+        probs, target = probs * m, target * m
     dims = (0, 2, 3)
     inter = (probs * target).sum(dims)
     denom = probs.sum(dims) + target.sum(dims)
     return 1.0 - ((2 * inter + eps) / (denom + eps)).mean()
 
 
+def masked_bce(per_px: torch.Tensor, valid: torch.Tensor | None) -> torch.Tensor:
+    """Mean BCE over annotated (image, channel) pairs only."""
+    if valid is None:
+        return per_px.mean()
+    m = valid.view(*valid.shape, 1, 1).expand_as(per_px)
+    return (per_px * m).sum() / m.sum().clamp(min=1.0)
+
+
 def compute_pos_weight(ds: SegmentationDataset, n_sample: int = 400) -> torch.Tensor:
+    """Inverse positive-pixel frequency per channel, capped.
+
+    Averaged over ANNOTATED images only. Counting an unknown channel as all-zero
+    would inflate its apparent rarity and hand the loss a pos_weight derived from
+    images that never carried a label for it.
+    """
     rng = np.random.default_rng(0)
     picks = rng.permutation(len(ds))[: min(len(ds), n_sample)]
     acc = np.zeros(len(ds.channels))
+    seen = np.zeros(len(ds.channels))
     for i in picks:
-        _, y = ds[int(i)]
-        acc += y.numpy().reshape(len(ds.channels), -1).mean(axis=1)
-    frac = np.clip(acc / len(picks), 1e-6, 1 - 1e-6)
+        _, y, v = ds[int(i)]
+        acc += y.numpy().reshape(len(ds.channels), -1).mean(axis=1) * v.numpy()
+        seen += v.numpy()
+    frac = np.clip(acc / np.maximum(seen, 1), 1e-6, 1 - 1e-6)
     return torch.tensor(np.minimum((1 - frac) / frac, POS_WEIGHT_CAP), dtype=torch.float32)
 
 
@@ -80,7 +113,14 @@ def compute_pos_weight(ds: SegmentationDataset, n_sample: int = 400) -> torch.Te
 def collect(model, loader, device, channels) -> dict:
     """One pass, keeping only what the metrics need: per-threshold tp/fp/fn per channel
     plus per-image predicted and true areas. Storing raw probability maps for 624
-    images x 4 channels would be 125M floats; storing counts is 4 numbers."""
+    images x 4 channels would be 125M floats; storing counts is 4 numbers.
+
+    Every count is masked by the per-image `valid` flags. A channel that was never
+    annotated for an image contributes no tp, no fp and no fn there: counting its
+    prediction as a false positive would be scoring the model against a label that
+    does not exist, and would make the real-data numbers look worse than the
+    evidence supports for exactly the same reason that counting it as a true
+    negative would make them look better."""
     C, T = len(channels), len(SWEEP_THRESHOLDS)
     tp = np.zeros((T, C), dtype=np.int64)
     fp = np.zeros((T, C), dtype=np.int64)
@@ -89,32 +129,37 @@ def collect(model, loader, device, channels) -> dict:
     img_iou_n = np.zeros((T, C), dtype=np.int64)
     empty_fp = np.zeros((T, C), dtype=np.int64)
     empty_n = np.zeros((T, C), dtype=np.int64)
-    pred_area, true_area = [[] for _ in range(T)], []
+    pred_area, true_area, valid_all = [[] for _ in range(T)], [], []
 
     model.eval()
     body_idx = channels.index("seed_body") if "seed_body" in channels else None
-    for x, y in loader:
+    for x, y, v in loader:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
+        v = v.to(device, non_blocking=True)                # (B, C) 1 = annotated
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
             probs = torch.sigmoid(model(x)).float()
+        vb = v.bool()
+        vl = v.long()
         yb = y.bool()
         true_px = y.sum(dim=(2, 3))                       # (B, C)
         true_area.append(true_px.cpu().numpy())
+        valid_all.append(v.cpu().numpy())
         for ti, th in enumerate(SWEEP_THRESHOLDS):
             p = probs > th
             inter = (p & yb).sum(dim=(2, 3))
             pcount = p.sum(dim=(2, 3))
             union = pcount + true_px.long() - inter
-            tp[ti] += inter.sum(0).cpu().numpy()
-            fp[ti] += (pcount - inter).sum(0).cpu().numpy()
-            fn[ti] += (true_px.long() - inter).sum(0).cpu().numpy()
-            has = true_px > 0
+            tp[ti] += (inter * vl).sum(0).cpu().numpy()
+            fp[ti] += ((pcount - inter) * vl).sum(0).cpu().numpy()
+            fn[ti] += ((true_px.long() - inter) * vl).sum(0).cpu().numpy()
+            has = (true_px > 0) & vb
             iou = torch.where(union > 0, inter.float() / union.clamp(min=1), torch.ones_like(inter, dtype=torch.float))
             img_iou_sum[ti] += (iou * has).sum(0).cpu().numpy()
             img_iou_n[ti] += has.sum(0).cpu().numpy()
-            empty_n[ti] += (~has).sum(0).cpu().numpy()
-            empty_fp[ti] += ((~has) & (pcount > MIN_REGION_PX)).sum(0).cpu().numpy()
+            clean = (true_px == 0) & vb
+            empty_n[ti] += clean.sum(0).cpu().numpy()
+            empty_fp[ti] += (clean & (pcount > MIN_REGION_PX)).sum(0).cpu().numpy()
             pred_area[ti].append(pcount.cpu().numpy())
 
     true_area = np.concatenate(true_area, axis=0)
@@ -126,6 +171,7 @@ def collect(model, loader, device, channels) -> dict:
         "empty_n": empty_n,
         "pred_area": [np.concatenate(a, axis=0) for a in pred_area],
         "true_area": true_area,
+        "valid": np.concatenate(valid_all, axis=0),
         "body_idx": body_idx,
     }
 
@@ -171,6 +217,7 @@ def coverage_error(stats: dict, thresholds: dict, channels: list[str]) -> dict:
     if bi is None:
         return {}
     true_body = stats["true_area"][:, bi]
+    valid = stats["valid"]
     out = {}
     for ci, ch in enumerate(channels):
         if ch == "seed_body":
@@ -178,7 +225,15 @@ def coverage_error(stats: dict, thresholds: dict, channels: list[str]) -> dict:
         ti = SWEEP_THRESHOLDS.index(thresholds[ch])
         pred = stats["pred_area"][ti][:, ci]
         pred_body = stats["pred_area"][SWEEP_THRESHOLDS.index(thresholds["seed_body"])][:, bi]
-        ok = true_body > 0
+        # Both the numerator's channel and the denominator's body must be
+        # annotated: a coverage % computed from an unknown defect mask is not a
+        # measurement with error, it is a number with no referent.
+        ok = (true_body > 0) & (valid[:, ci] > 0) & (valid[:, bi] > 0)
+        if not ok.any():
+            out[ch] = {"n_images_with_defect": 0, "area_tier": "UNKNOWN",
+                       "note": "no image in this split carries an annotation for "
+                               "both this channel and the seed body"}
+            continue
         true_cov = np.where(ok, stats["true_area"][:, ci] / np.maximum(true_body, 1) * 100, 0.0)
         cov_true_den = np.where(ok, pred[:] / np.maximum(true_body, 1) * 100, 0.0)
         cov_pred_den = np.where(pred_body > 0, pred[:] / np.maximum(pred_body, 1) * 100, 0.0)
@@ -202,6 +257,36 @@ def coverage_error(stats: dict, thresholds: dict, channels: list[str]) -> dict:
             "area_tier": area_tier(rel_med) if rel_med is not None else "UNKNOWN",
         }
     return out
+
+
+SYNTHETIC_PROVENANCE = {
+    "label_provenance": "synthetic",
+    "label_note": ("Every defect mask was re-derived from the transformation "
+                   "parameters logged when this project painted the defect "
+                   "(src/data/synthetic_defect_generator.reconstruct_defect_mask). "
+                   "Exact by construction, and synthetic. seed_body is an "
+                   "algorithmic threshold label, not a human annotation. These "
+                   "numbers do NOT establish performance on real defects."),
+}
+
+
+def read_provenance(manifest_path: str) -> dict:
+    """Label provenance for a manifest, taken from its sidecar.
+
+    Provenance travels WITH the data rather than as a command-line flag. A flag
+    can be forgotten on a rerun, and the failure mode of forgetting it is a
+    checkpoint that claims real human annotation for synthetic masks -- the one
+    claim this project must never make by accident.
+    """
+    sidecar = os.path.splitext(manifest_path)[0] + ".provenance.json"
+    if os.path.exists(sidecar):
+        with open(sidecar) as fh:
+            prov = json.load(fh)
+        missing = {"label_provenance", "label_note"} - set(prov)
+        if missing:
+            raise SystemExit(f"{sidecar} is missing {sorted(missing)}")
+        return prov
+    return dict(SYNTHETIC_PROVENANCE)
 
 
 def main():
@@ -234,6 +319,9 @@ def main():
     batch_size = args.batch_size or tr["batch_size"]
     lr = args.lr or tr["learning_rate"]
     size = tr["image_size"]
+
+    prov = read_provenance(args.manifest)
+    logger.info(f"label provenance: {prov['label_provenance']}")
 
     train_ds = SegmentationDataset(args.manifest, "train", image_size=size, augment=True, seed=cfg["seed"])
     val_ds = SegmentationDataset(args.manifest, "val", image_size=size, augment=False)
@@ -281,7 +369,10 @@ def main():
     else:
         pos_weight = compute_pos_weight(SegmentationDataset(args.manifest, "train", image_size=size, augment=False))
         logger.info("pos_weight " + ", ".join(f"{c}={w:.1f}" for c, w in zip(channels, pos_weight.tolist())))
-        bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight.view(1, -1, 1, 1).to(device))
+        # reduction="none": the mean has to be taken over ANNOTATED elements only,
+        # which the loss function cannot know about.
+        bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight.view(1, -1, 1, 1).to(device),
+                                   reduction="none")
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=tr["weight_decay"])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(epochs, 1))
@@ -301,13 +392,14 @@ def main():
     for epoch in ([] if args.eval_only else range(1, epochs + 1)):
         model.train()
         t0, running = time.time(), 0.0
-        for x, y in train_ld:
+        for x, y, v in train_ld:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
+            v = v.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
                 logits = model(x)
-                loss = bce(logits, y) + dice_loss(logits, y)
+                loss = masked_bce(bce(logits, y), v) + dice_loss(logits, y, v)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -336,9 +428,8 @@ def main():
                 "image_size": size,
                 "backbone": cfg["backbone"],
                 "use_attention": not args.no_attention,
-                "label_provenance": "synthetic",
-                "label_note": ("Masks re-derived from logged synthetic transformation "
-                               "parameters. NOT human-annotated real defects."),
+                "label_provenance": prov["label_provenance"],
+                "label_note": prov["label_note"],
                 "epoch": epoch,
                 "val_defect_dice": score,
             }, ckpt_path)
@@ -371,13 +462,8 @@ def main():
     out = {
         "model": args.out_name,
         "manifest": args.manifest,
-        "label_provenance": "synthetic",
-        "label_note": ("Every defect mask was re-derived from the transformation "
-                       "parameters logged when this project painted the defect "
-                       "(src/data/synthetic_defect_generator.reconstruct_defect_mask). "
-                       "Exact by construction, and synthetic. seed_body is an "
-                       "algorithmic threshold label, not a human annotation. These "
-                       "numbers do NOT establish performance on real defects."),
+        "label_provenance": prov["label_provenance"],
+        "label_note": prov["label_note"],
         "channels": channels,
         "split_unit": "source seed image (no kernel appears in two splits)",
         "n_train": len(train_ds), "n_val": len(val_ds), "n_test": len(test_ds),

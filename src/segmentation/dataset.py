@@ -1,11 +1,32 @@
 """Image + mask dataset for defect segmentation.
 
-Reads data_processed/manifest_segmentation_synthetic.csv (built by
-src.segmentation.build_synthetic_manifest) and returns, per sample:
+Reads either segmentation manifest and returns, per sample:
 
     image  float32 (3, H, W)   ImageNet-normalised, same convention as every other
                                model in this project (src/contrastive/simclr.py)
     target float32 (C, H, W)   one binary plane per channel in CHANNELS order
+    valid  float32 (C,)        1 where that channel is ANNOTATED for this image,
+                               0 where its true content is unknown
+
+TWO MANIFEST SCHEMAS, ONE DATASET.
+
+  * synthetic (data_processed/manifest_segmentation_synthetic.csv, built by
+    src.segmentation.build_synthetic_manifest): columns defect_mask_path /
+    body_mask_path / label. The generator painted exactly one defect class per
+    kernel, so every other defect plane is a genuine true negative and `valid`
+    is all ones.
+  * real (data_processed/manifest_segmentation_real.csv, built by
+    src.annotation.build_real_manifest): per-channel mask_<ch> / valid_<ch>
+    columns, and `channels` is read from the header rather than imported.
+
+WHY `valid` EXISTS. A human reviewer looking at a GrainSpace AP kernel marks the
+insect damage. They do not certify that the same kernel is free of cracks --
+that question was never asked. Scoring the cracked plane as an all-zero target
+there would be inventing a label, and it would train the model that visible
+fracture faces are background whenever they co-occur with bore holes. Unknown
+channels are therefore excluded from both the loss and the metrics. The one case
+where a defect plane IS a certified negative is a kernel the reviewer marked
+no_defect: nothing visible means nothing visible on every channel.
 
 The target is a STACK, not a label map, because the planes overlap: `seed_body`
 contains every defect pixel by definition, and a real kernel can be cracked and
@@ -37,6 +58,23 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 # defect. It is a re-read of an exact binary file, not a soft-alpha decision, so the
 # midpoint is safe; it exists as a constant only so the value is greppable.
 MASK_BINARIZE_THRESHOLD = 127
+
+MASK_COL_PREFIX = "mask_"
+VALID_COL_PREFIX = "valid_"
+
+
+def channels_from_header(fieldnames: list[str]) -> list[str] | None:
+    """Channel list for a per-channel manifest, or None for the legacy schema.
+
+    Header order is the channel order, and it is the ONLY definition of that
+    order for a real manifest. A channel list hard-coded here could disagree with
+    the file and silently transpose two mask planes -- an error that trains
+    cleanly and only shows up as a model that calls mould a crack.
+    """
+    cols = [f for f in fieldnames if f.startswith(MASK_COL_PREFIX)]
+    if not cols:
+        return None
+    return [c[len(MASK_COL_PREFIX):] for c in cols]
 
 
 def _joint_geometric(img: np.ndarray, target: np.ndarray, rng: np.random.Generator):
@@ -84,18 +122,22 @@ class SegmentationDataset(Dataset):
         channels: list[str] | None = None,
         seed: int = 42,
     ):
-        self.channels = list(channels) if channels else list(CHANNELS)
         self.image_size = image_size
         self.augment = augment
         self.seed = seed
 
         with open(manifest_path) as fh:
-            rows = [r for r in csv.DictReader(fh) if r["split"] == split]
+            reader = csv.DictReader(fh)
+            header = list(reader.fieldnames or [])
+            rows = [r for r in reader if r["split"] == split]
         if not rows:
             raise SystemExit(
                 f"no rows with split={split!r} in {manifest_path}; run "
-                "python -m src.segmentation.build_synthetic_manifest first"
+                "python -m src.segmentation.build_synthetic_manifest "
+                "(or python -m src.annotation.build_real_manifest) first"
             )
+        self.per_channel = channels_from_header(header)
+        self.channels = list(channels) if channels else (self.per_channel or list(CHANNELS))
         self.rows = rows
         self.split = split
 
@@ -118,19 +160,24 @@ class SegmentationDataset(Dataset):
         img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         h, w = img.shape[:2]
 
-        defect = self._read_mask(r["defect_mask_path"], (h, w))
-        body = self._read_mask(r["body_mask_path"], (h, w))
-
-        planes = []
-        for ch in self.channels:
-            if ch == "seed_body":
-                planes.append(body)
-            elif ch == r["label"]:
-                planes.append(defect)
-            else:
-                # Not "unknown" -- the generator painted exactly one defect class onto
-                # this kernel, so every other defect plane is a true negative.
-                planes.append(np.zeros((h, w), dtype=np.uint8))
+        planes, valid = [], []
+        if self.per_channel:
+            for ch in self.channels:
+                planes.append(self._read_mask(r.get(MASK_COL_PREFIX + ch, ""), (h, w)))
+                valid.append(float(r.get(VALID_COL_PREFIX + ch, "1") == "1"))
+        else:
+            defect = self._read_mask(r["defect_mask_path"], (h, w))
+            body = self._read_mask(r["body_mask_path"], (h, w))
+            for ch in self.channels:
+                if ch == "seed_body":
+                    planes.append(body)
+                elif ch == r["label"]:
+                    planes.append(defect)
+                else:
+                    # Not "unknown" -- the generator painted exactly one defect class
+                    # onto this kernel, so every other defect plane is a true negative.
+                    planes.append(np.zeros((h, w), dtype=np.uint8))
+                valid.append(1.0)
         target = np.stack(planes, axis=0)
 
         s = self.image_size
@@ -155,7 +202,8 @@ class SegmentationDataset(Dataset):
         x = (x - IMAGENET_MEAN) / IMAGENET_STD
         x = torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))
         y = torch.from_numpy(np.ascontiguousarray(target)).float()
-        return x, y
+        v = torch.tensor(valid, dtype=torch.float32)
+        return x, y, v
 
 
 def describe(manifest_path: str) -> None:
@@ -168,6 +216,7 @@ def describe(manifest_path: str) -> None:
         ds = SegmentationDataset(manifest_path, split, augment=False)
         n = len(ds)
         sums = np.zeros(len(ds.channels))
+        annotated = np.zeros(len(ds.channels))
         total = 0
         # RANDOM subsample, not a stride. The manifest is written in source order and
         # every source contributes its four classes consecutively, so any fixed stride
@@ -175,13 +224,18 @@ def describe(manifest_path: str) -> None:
         # reports 0.00% for the rest -- a fake statistic produced by the sampler.
         picks = np.random.default_rng(0).permutation(n)[:min(n, 400)]
         for i in picks:
-            _, y = ds[int(i)]
-            sums += y.numpy().reshape(len(ds.channels), -1).mean(axis=1)
+            _, y, v = ds[int(i)]
+            # Positive fraction is averaged over ANNOTATED images only. Averaging in
+            # the unknown ones would push the figure toward zero and hand the
+            # pos_weight computed from it a rarity that was never observed.
+            sums += y.numpy().reshape(len(ds.channels), -1).mean(axis=1) * v.numpy()
+            annotated += v.numpy()
             total += 1
-        frac = sums / max(total, 1)
+        frac = sums / np.maximum(annotated, 1)
         print(f"{split:5s} n={n:5d} sampled={total:4d}")
-        for ch, f in zip(ds.channels, frac):
-            print(f"        {ch:18s} mean positive pixels {f * 100:6.2f}%")
+        for ch, f, a in zip(ds.channels, frac, annotated):
+            print(f"        {ch:18s} annotated in {int(a):4d}/{total:4d} sampled  "
+                  f"mean positive pixels {f * 100:6.2f}%")
 
 
 if __name__ == "__main__":
@@ -190,5 +244,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest", default="data_processed/manifest_segmentation_synthetic.csv")
     args = ap.parse_args()
-    print("channels:", CHANNELS, " (defects:", DEFECT_CHANNELS, ")")
+    probe = SegmentationDataset(args.manifest, "train", augment=False)
+    print("channels:", probe.channels,
+          "(schema: per-channel)" if probe.per_channel else f"(schema: legacy, defects {DEFECT_CHANNELS})")
     describe(args.manifest)
