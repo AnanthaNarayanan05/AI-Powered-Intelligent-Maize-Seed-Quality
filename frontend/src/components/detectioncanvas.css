@@ -1,0 +1,152 @@
+.dcanvas {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.dcanvas__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.dcanvas__spacer {
+  flex: 1;
+}
+
+.dcanvas__tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0.32rem 0.6rem;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-sm);
+  background: rgba(24, 32, 28, 0.6);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+.dcanvas__tool:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--glass-border-strong);
+}
+.dcanvas__tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.dcanvas__tool.is-on {
+  color: var(--green);
+  border-color: rgba(111, 191, 115, 0.34);
+  background: rgba(111, 191, 115, 0.08);
+}
+.dcanvas__zoom {
+  font-size: var(--text-xs);
+  color: var(--ink-faint);
+  min-width: 42px;
+  text-align: center;
+}
+
+.dcanvas__viewport {
+  position: relative;
+  overflow: auto;
+  border-radius: var(--r-md);
+  background: #0a0d0b;
+  border: 1px solid var(--glass-border);
+  max-height: 560px;
+}
+
+.dcanvas__stage {
+  position: relative;
+  transform-origin: top left;
+  transition: transform var(--dur-base) var(--ease);
+  width: fit-content;
+}
+
+.dcanvas__img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+/* ---------- bounding box ---------- */
+.dbox {
+  position: absolute;
+  padding: 0;
+  background: transparent;
+  border: 1.5px solid var(--green);
+  border-radius: 3px;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(8, 11, 10, 0.5), 0 0 14px rgba(111, 191, 115, 0.28);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.dbox:hover {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px rgba(8, 11, 10, 0.5), 0 0 18px var(--gold-glow);
+}
+.dbox.is-active {
+  border-color: var(--gold);
+  border-width: 2px;
+  box-shadow: 0 0 0 1px rgba(8, 11, 10, 0.6), 0 0 26px rgba(244, 197, 66, 0.4);
+}
+
+/* Flagged kernel. The box turns red and carries a single dot, so a defective
+   seed is findable at a glance in a dense frame without the per-box index and
+   confidence labels that used to crowd the image. */
+.dbox.is-flagged {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px rgba(8, 11, 10, 0.5), 0 0 16px rgba(232, 112, 90, 0.45);
+}
+.dbox.is-flagged:hover,
+.dbox.is-flagged.is-active {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px rgba(8, 11, 10, 0.6), 0 0 26px rgba(232, 112, 90, 0.6);
+}
+
+/* Extrapolated grade: amber and hollow, never the solid red of a measured defect.
+   The distinction is visual, not just textual, so a glance cannot mistake a guess
+   for a measurement. */
+.dbox.is-unverified {
+  border-color: var(--warn);
+  border-style: dashed;
+  box-shadow: 0 0 0 1px rgba(8, 11, 10, 0.5), 0 0 14px rgba(244, 197, 66, 0.3);
+}
+.dbox__flag--unverified {
+  background: transparent;
+  border-color: var(--warn);
+  border-width: 2px;
+  box-shadow: 0 0 8px rgba(244, 197, 66, 0.7);
+}
+
+.dbox__flag {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--r-full);
+  background: var(--danger);
+  border: 1.5px solid #0a0d0b;
+  box-shadow: 0 0 8px rgba(232, 112, 90, 0.8);
+}
+
+/* The pulse draws the eye to defects; it is purely decorative, so it yields to
+   a reduced-motion preference. */
+@media (prefers-reduced-motion: no-preference) {
+  .dbox__flag {
+    animation: dbox-flag-pulse 1.9s var(--ease) infinite;
+  }
+}
+@keyframes dbox-flag-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.28);
+    opacity: 0.75;
+  }
+}

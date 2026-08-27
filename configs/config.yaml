@@ -1,0 +1,92 @@
+# Central project configuration. All training/inference scripts read from here.
+# Device auto-detects CUDA (RTX 4060 on the user's laptop) and falls back to CPU.
+
+seed: 42
+
+device:
+  prefer: cuda        # "cuda" | "cpu" — auto-falls back to cpu if cuda unavailable
+  mixed_precision: true
+
+paths:
+  dataset_a: datasets/dataset_variety_a_corntype/Corn_3_Classes_Image_Dataset
+  dataset_b: datasets/dataset_2_variety/MaizeData
+  dataset_c: datasets/dataset_3_detection
+  processed: data_processed
+  checkpoints: outputs/checkpoints
+  logs: outputs/logs
+  metrics: outputs/metrics
+  visualizations: outputs/visualizations
+  predictions: outputs/predictions
+  database: database/app.db
+  faiss_index_a: outputs/checkpoints/faiss_variety_a.index
+  faiss_index_b: outputs/checkpoints/faiss_variety_b.index
+
+dataset_a:
+  name: corn_3_classes
+  classes: [Zea_mays_Chulpi_Cancha, Zea_mays_Indurata, Zea_mays_Rugosa]
+  image_size: 400
+  num_images: 1050
+
+dataset_b:
+  name: maize_data
+  classes: [Bhihilifa, SanzalSima, WangDataa]
+  image_size: 224
+  num_images: 17724
+
+dataset_c:
+  name: grain_and_objects_detection
+  classes: [Corn]
+  num_images: 1251
+
+training:
+  image_size: 224
+  batch_size: 32
+  epochs: 40
+  learning_rate: 0.0003
+  weight_decay: 0.00001
+  early_stopping_patience: 6
+  num_workers: 4
+  val_split: 0.15
+  test_split: 0.15
+
+contrastive:
+  method: simclr
+  projection_dim: 128
+  temperature: 0.5
+  pretrain_epochs: 60
+  pretrain_batch_size: 64
+
+attention:
+  use_channel_attention: true
+  use_spatial_attention: true
+  use_multiscale: true
+
+backbone: efficientnet_b0
+
+detection:
+  framework: ultralytics_yolo
+  model: yolov8n.pt
+  image_size: 640
+  batch_size: 16
+  epochs: 80
+  conf_threshold: 0.25
+  # Non-max-suppression IoU. Ultralytics defaults to 0.70, which was too permissive
+  # for this detector: it was trained on Dataset C (34 objects/image, dense) but is
+  # also served single-seed close-ups, where one kernel filling the frame produced
+  # two overlapping boxes on 41.7% of images and inflated the seed count. Swept
+  # across both regimes (see docs/09 section 6.8): 0.40 cuts the close-up duplicate
+  # rate to 1.7% AND lowers dense count error from 1.20 to 0.72. Below 0.30 it
+  # starts suppressing genuine adjacent seeds.
+  nms_iou: 0.40
+  # Fraction of box width/height added as context margin when cropping a detected
+  # seed before classification. The variety classifier is trained on whole images,
+  # so a tight YOLO box removes context it depends on: measured on the Dataset A
+  # held-out test split, 0.0 padding scores 77.63% while 0.30 recovers the full
+  # 100.00%. See docs/09_PROJECT_STATUS_REPORT.md section 6.6.
+  crop_context_pad: 0.30
+  iou_threshold: 0.45
+
+gemini:
+  model: gemini-3.6-flash
+  max_output_tokens: 800
+  timeout_seconds: 20

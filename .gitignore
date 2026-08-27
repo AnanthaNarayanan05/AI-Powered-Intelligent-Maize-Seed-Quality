@@ -1,0 +1,27 @@
+.env
+.env.local
+venv/
+__pycache__/
+*.pyc
+node_modules/
+outputs/checkpoints/*.pt
+outputs/checkpoints/*.pth
+outputs/logs/
+database/*.db
+data_processed/
+datasets/*/*.jpg
+datasets/*/*.jpeg
+datasets/*/*.png
+.DS_Store
+*.egg-info/
+dist/
+build/
+
+# --- added for the code checkpoint: keep the repo to source only ---
+datasets/
+outputs/
+*.zip
+*.pt
+yolo*.pt
+frontend/dist/
+.venv/

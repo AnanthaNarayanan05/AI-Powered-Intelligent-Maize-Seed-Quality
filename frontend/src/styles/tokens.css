@@ -1,0 +1,102 @@
+/* ============================================================
+   MAIZE INTELLIGENCE — design tokens
+   Single source of truth for colour, type, spacing, motion.
+   Never hard-code a colour in a component; reference a token.
+   ============================================================ */
+
+:root {
+  /* ---- surfaces: obsidian base, layered upward ---- */
+  --bg-base: #080b0a;
+  --bg-1: #101512;
+  --bg-2: #141a17;
+  --bg-3: #18201c;
+  --bg-elevated: #1c2521;
+
+  /* ---- glass ---- */
+  --glass-bg: rgba(20, 26, 23, 0.72);
+  --glass-border: rgba(245, 242, 232, 0.08);
+  --glass-border-strong: rgba(245, 242, 232, 0.14);
+  --glass-blur: 14px;
+
+  /* ---- accents ----
+     gold  = results, seed intelligence, primary actions, high-value metrics
+     green = healthy / success / completion
+     cyan  = AI, embeddings, Gemini, neural activity                        */
+  --gold: #f4c542;
+  --gold-dim: #c9a233;
+  --gold-glow: rgba(244, 197, 66, 0.18);
+  --green: #6fbf73;
+  --green-dim: #4e8f52;
+  --green-glow: rgba(111, 191, 115, 0.16);
+  --cyan: #48d6c6;
+  --cyan-dim: #2f9e92;
+  --cyan-glow: rgba(72, 214, 198, 0.16);
+
+  /* ---- state ---- */
+  --danger: #e8705a;
+  --danger-glow: rgba(232, 112, 90, 0.15);
+  --warn: #e0a340;
+  --warn-glow: rgba(224, 163, 64, 0.14);
+
+  /* ---- text ---- */
+  --ink: #f5f2e8;
+  --ink-muted: #a4b0a6;
+  --ink-faint: #6f7d72;
+
+  /* ---- type ---- */
+  --font-sans: "Inter", "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.85rem;
+  --text-base: 0.95rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.4rem;
+  --text-2xl: 1.9rem;
+  --text-3xl: 2.6rem;
+  --text-display: 4.2rem;
+
+  /* ---- spacing ---- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+  --sp-8: 4rem;
+
+  /* ---- radius ---- */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-full: 999px;
+
+  /* ---- shadow ---- */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.55);
+
+  /* ---- motion ---- */
+  --dur-fast: 150ms;
+  --dur-base: 250ms;
+  --dur-slow: 400ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ---- layout ---- */
+  --sidebar-w: 232px;
+  --content-max: 1560px;
+}
+
+/* Honour the OS reduced-motion preference everywhere, including the 3D hero. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
