@@ -25,7 +25,8 @@ const MODULES = [
     tone: "gold",
     title: "Detect",
     body: "Locate and count individual maize seeds with a trained YOLO detector.",
-    tag: "YOLOv8 · mAP@50 98.2%",
+    tag: "YOLOv8n",
+    metric: { model: "detection", label: "mAP@50" },
   },
   {
     icon: Leaf,
@@ -39,7 +40,8 @@ const MODULES = [
     tone: "warn",
     title: "Analyze",
     body: "Grade kernel quality against expert-assigned Good/Bad labels, with extrapolated grades marked unverified.",
-    tag: "97.3% test accuracy",
+    tag: "EfficientNet-B0",
+    metric: { model: "unified_seed_model", label: "Quality accuracy" },
   },
   {
     icon: Brain,
@@ -49,6 +51,24 @@ const MODULES = [
     tag: "Grad-CAM + Gemini",
   },
 ];
+
+// A card's headline number is read from the model's own evaluation file via
+// /api/system-info, never typed in here — the "97.3% test accuracy" this replaced
+// had drifted from the 97.2% the checkpoint actually scored.
+function moduleTag(mod, models) {
+  if (!mod.metric) return mod.tag;
+  const found = models.find((m) => m.key === mod.metric.model);
+  const metric = found?.metrics?.find((x) => x.label === mod.metric.label);
+  return metric ? `${mod.tag} · ${mod.metric.label} ${metric.value}` : mod.tag;
+}
+
+const MODEL_PILL = { ready: "Ready", available: "Not served", missing: "Missing" };
+// short strip labels; the API's full model names are too long for a pill
+const PILL_LABEL = {
+  detection: "Detection model",
+  unified_seed_model: "Variety + quality",
+  quality_gate: "Distribution gate",
+};
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -71,6 +91,7 @@ export default function Dashboard() {
     };
   }, []);
 
+  const modelStatus = Object.fromEntries((info?.models || []).map((m) => [m.key, m]));
   const hasData = stats?.has_data;
   const fmt = (n) => (n == null ? "—" : n.toLocaleString());
 
@@ -122,16 +143,32 @@ export default function Dashboard() {
       </section>
 
       {/* ---------------- live system strip ---------------- */}
+      {/* "Ready" used to be printed here unconditionally, so the strip claimed a full
+         stack even on a machine with no checkpoints at all. Each pill now reflects
+         what /api/system-info found on disk. */}
       <section className="strip" aria-label="System status">
-        <StatusPill label="Vision engine" value="Online" tone="ok" pulse />
-        <StatusPill label="Variety model" value="Ready" tone="ok" />
-        <StatusPill label="Detection model" value="Ready" tone="ok" />
-        <StatusPill label="Quality model" value="Ready" tone="ok" />
+        <StatusPill
+          label="Vision engine"
+          value={info ? "Online" : loading ? "Checking" : "Unreachable"}
+          tone={info ? "ok" : loading ? "idle" : "warn"}
+          pulse={!!info}
+        />
+        {["detection", "unified_seed_model", "quality_gate"].map((key) => {
+          const m = modelStatus[key];
+          return (
+            <StatusPill
+              key={key}
+              label={PILL_LABEL[key]}
+              value={m ? MODEL_PILL[m.status] || m.status : loading ? "Checking" : "Unknown"}
+              tone={m?.status === "ready" ? "ok" : m ? "warn" : "idle"}
+            />
+          );
+        })}
         <StatusPill
           label="Gemini"
-          value={info?.gemini_configured ? "Connected" : "Not configured"}
-          tone={info?.gemini_configured ? "ai" : "warn"}
-          pulse={!!info?.gemini_configured}
+          value={info?.gemini?.configured ? "Connected" : "Not configured"}
+          tone={info?.gemini?.configured ? "ai" : "warn"}
+          pulse={!!info?.gemini?.configured}
         />
       </section>
 
@@ -239,7 +276,9 @@ export default function Dashboard() {
                 </div>
                 <h3 className="modcard__title">{m.title}</h3>
                 <p className="modcard__body">{m.body}</p>
-                <span className={`modcard__tag modcard__tag--${m.tone}`}>{m.tag}</span>
+                <span className={`modcard__tag modcard__tag--${m.tone}`}>
+                  {moduleTag(m, info?.models || [])}
+                </span>
               </GlassCard>
             </motion.div>
           ))}

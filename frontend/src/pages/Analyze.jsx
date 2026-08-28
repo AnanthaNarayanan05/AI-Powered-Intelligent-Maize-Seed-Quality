@@ -148,7 +148,7 @@ export default function Analyze() {
     <Page className="an">
       <SectionHeader
         title="Analyze seed image"
-        subtitle="Upload an image to run detection, variety recognition, defect classification, similarity search and explainability in a single pass."
+        subtitle="Upload an image to run detection, variety recognition, kernel quality grading, similarity search and explainability in a single pass."
         right={
           status !== "idle" && (
             <Button variant="ghost" size="sm" icon={RotateCcw} onClick={reset}>

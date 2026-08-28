@@ -13,17 +13,58 @@ import {
 } from "../components/ui";
 import "./systeminfo.css";
 
-/* The model stack is a static description of the architecture, not a live probe.
-   Availability that IS live (backend, Gemini) is fetched; anything describing how
-   a model was trained is fixed and must stay accurate to the project docs. */
-const MODEL_STACK = [
-  { name: "Seed detection", model: "YOLOv8n", detail: "1 class · mAP@50 98.2%", tone: "ok", state: "Trained" },
-  { name: "Variety recognition", model: "EfficientNet-B0 + cognitive attention", detail: "Datasets A & B · 3 classes each", tone: "ok", state: "Trained" },
-  { name: "Contrastive pretraining", model: "SimCLR / NT-Xent", detail: "60 epochs per dataset", tone: "ok", state: "Trained" },
-  { name: "Kernel quality", model: "Unified model, quality head", detail: "Expert-assigned Good/Bad labels", tone: "ok", state: "READY" },
-  { name: "Similarity search", model: "FAISS IndexFlatL2", detail: "Feature embeddings, both datasets", tone: "ok", state: "Built" },
-  { name: "Explainability", model: "Grad-CAM", detail: "Attention map — not segmentation", tone: "ok", state: "Available" },
-];
+/* Nothing about the model stack is written into this file. It is read from
+   /api/system-info, which probes checkpoints, evaluation JSON and index sidecars on
+   every request — the previous hard-coded table went on advertising "Datasets A & B
+   · 3 classes each" for weeks after one 6-variety model replaced both. */
+
+const STATUS_TONE = { ready: "ok", available: "neutral", missing: "warn" };
+const STATUS_LABEL = { ready: "Serving", available: "Trained", missing: "Not on this machine" };
+
+function ModelRow({ model, index }) {
+  return (
+    <motion.div
+      className="si__row"
+      initial={{ opacity: 0, x: -6 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.3, delay: 0.04 * index }}
+    >
+      <div className="si__rowmain">
+        <span className="si__rowname">{model.name}</span>
+        <span className="si__rowmodel mono">{model.architecture}</span>
+        <span className="si__rowdetail">{model.role}</span>
+
+        {model.metrics.length > 0 && (
+          <div className="si__metrics">
+            {model.metrics.map((m) => (
+              <span className="si__metric" key={m.label} title={m.n ? `n = ${m.n}` : undefined}>
+                <span className="si__metriclabel">{m.label}</span>
+                <span className="si__metricval mono">{m.value}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* The training script's own caveat, shown verbatim rather than paraphrased. */}
+        {model.label_provenance === "synthetic" && (
+          <span className="si__rownote">
+            Labels are synthetic. {model.note}
+          </span>
+        )}
+
+        <span className="si__rowpath mono" title={model.checkpoint}>
+          {model.checkpoint}
+        </span>
+      </div>
+      <Badge
+        tone={STATUS_TONE[model.status] || "neutral"}
+        title={model.trained_at ? `Checkpoint written ${model.trained_at}` : undefined}
+      >
+        {STATUS_LABEL[model.status] || model.status}
+      </Badge>
+    </motion.div>
+  );
+}
 
 export default function SystemInfo() {
   const [info, setInfo] = useState(null);
@@ -49,11 +90,22 @@ export default function SystemInfo() {
     };
   }, []);
 
+  const models = info?.models || [];
+  const served = models.filter((m) => m.served);
+  const offline = models.filter((m) => !m.served);
+  const runtime = info?.runtime;
+  const db = info?.database;
+  const galleries = (info?.similarity_indices || []).filter((g) => g.status === "built");
+  // the banner's headline number comes from the checkpoint's own evaluation file
+  const qualityAcc = models
+    .find((m) => m.key === "unified_seed_model")
+    ?.metrics?.find((x) => x.label === "Quality accuracy")?.value;
+
   return (
     <Page className="si">
       <SectionHeader
         title="System information"
-        subtitle="What this platform genuinely supports, what it does not, and which models back each capability."
+        subtitle="Read live from this server: the models actually loaded, the numbers they actually scored, and the capabilities the data cannot support."
       />
 
       {state === "error" && (
@@ -70,12 +122,12 @@ export default function SystemInfo() {
         <div>
           <strong className="si__bannertitle">Quality grading is real, and bounded</strong>
           <p className="si__bannerbody">
-            Kernel quality is graded against expert-assigned Good/Bad labels, scoring 97.3% on a held-out
-            test split with 99.1% precision on the defective class. The bound matters as much as the
-            number: applied to imagery unlike its training data the model extrapolates confidently, so
-            every grade is checked against the region where the model actually has evidence. Grades
-            outside it are marked <strong>unverified</strong> rather than reported as defects. A Good/Bad
-            grade is not a pathogen diagnosis and not a severity score.
+            Kernel quality is graded against expert-assigned Good/Bad labels
+            {qualityAcc ? `, scoring ${qualityAcc} on a held-out test split` : ""}. The bound matters as much as the number: applied to imagery unlike
+            its training data the model extrapolates confidently, so every grade is checked against
+            the region where the model actually has evidence. Grades outside it are marked{" "}
+            <strong>unverified</strong> rather than reported as defects. A Good/Bad grade is not a
+            pathogen diagnosis and not a severity score.
           </p>
         </div>
       </GlassCard>
@@ -83,68 +135,130 @@ export default function SystemInfo() {
       <div className="si__cols">
         {/* ---------- model stack ---------- */}
         <GlassCard>
-          <SectionHeader title="Model stack" level={3} />
-          <div className="si__stack">
-            {MODEL_STACK.map((m, i) => (
-              <motion.div
-                className="si__row"
-                key={m.name}
-                initial={{ opacity: 0, x: -6 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.3, delay: 0.04 * i }}
-              >
-                <div className="si__rowmain">
-                  <span className="si__rowname">{m.name}</span>
-                  <span className="si__rowmodel mono">{m.model}</span>
-                  <span className="si__rowdetail">{m.detail}</span>
-                </div>
-                <Badge tone={m.tone === "warn" ? "warn" : "ok"}>{m.state}</Badge>
-              </motion.div>
-            ))}
-          </div>
-        </GlassCard>
-
-        {/* ---------- live status ---------- */}
-        <GlassCard>
-          <SectionHeader title="System status" level={3} />
+          <SectionHeader
+            title="Model stack"
+            subtitle="Status, metrics and checkpoint paths are probed on this machine at request time."
+            level={3}
+          />
           {state === "loading" ? (
             <div className="si__skel">
-              <Skeleton height="14px" />
-              <Skeleton height="14px" width="80%" />
-              <Skeleton height="14px" width="60%" />
+              <Skeleton height="52px" />
+              <Skeleton height="52px" />
+              <Skeleton height="52px" />
             </div>
           ) : (
-            <div className="si__statuslist">
-              <div className="si__status">
-                <Server size={15} />
-                <span>Backend API</span>
-                <span className="si__statusval">
-                  <StatusDot tone="ok" pulse /> Online
-                </span>
+            <>
+              <div className="si__stack">
+                {served.map((m, i) => (
+                  <ModelRow key={m.key} model={m} index={i} />
+                ))}
               </div>
-              <div className="si__status">
-                <Database size={15} />
-                <span>Database</span>
-                <span className="si__statusval">
-                  <StatusDot tone="ok" /> Connected
-                </span>
-              </div>
-              <div className="si__status">
-                <Cpu size={15} />
-                <span>Inference device</span>
-                <span className="si__statusval mono">CUDA / CPU fallback</span>
-              </div>
-              <div className="si__status">
-                <Sparkles size={15} />
-                <span>Gemini copilot</span>
-                <span className="si__statusval">
-                  <StatusDot tone={info?.gemini_configured ? "ai" : "warn"} pulse={!!info?.gemini_configured} />
-                  {info?.gemini_configured ? "Connected" : "Not configured"}
-                </span>
-              </div>
-            </div>
+
+              {offline.length > 0 && (
+                <>
+                  <SectionHeader
+                    title="Trained but not served"
+                    subtitle="Kept for reproducibility. These do not contribute to any result the platform reports."
+                    level={4}
+                  />
+                  <div className="si__stack si__stack--muted">
+                    {offline.map((m, i) => (
+                      <ModelRow key={m.key} model={m} index={i} />
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
           )}
         </GlassCard>
+
+        <div className="si__side">
+          {/* ---------- live status ---------- */}
+          <GlassCard>
+            <SectionHeader title="System status" level={3} />
+            {state === "loading" ? (
+              <div className="si__skel">
+                <Skeleton height="14px" />
+                <Skeleton height="14px" width="80%" />
+                <Skeleton height="14px" width="60%" />
+              </div>
+            ) : (
+              <div className="si__statuslist">
+                <div className="si__status">
+                  <Server size={15} />
+                  <span>Backend API</span>
+                  <span className="si__statusval">
+                    <StatusDot tone={state === "ready" ? "ok" : "warn"} pulse={state === "ready"} />
+                    {state === "ready" ? `Online · v${info.backend.api_version}` : "Unreachable"}
+                  </span>
+                </div>
+                <div className="si__status">
+                  <Database size={15} />
+                  <span>Database</span>
+                  <span className="si__statusval">
+                    <StatusDot tone={db?.status === "connected" ? "ok" : "warn"} />
+                    {db?.status === "connected"
+                      ? `${db.tables.analyses.toLocaleString()} analyses`
+                      : db?.status || "unknown"}
+                  </span>
+                </div>
+                <div className="si__status">
+                  <Cpu size={15} />
+                  <span>Inference device</span>
+                  {/* the GPU name only appears when CUDA actually answered */}
+                  <span className="si__statusval mono">
+                    {runtime?.gpu || (runtime ? "CPU" : "unknown")}
+                  </span>
+                </div>
+                <div className="si__status">
+                  <Sparkles size={15} />
+                  <span>Gemini copilot</span>
+                  <span className="si__statusval">
+                    <StatusDot
+                      tone={info?.gemini?.configured ? "ai" : "warn"}
+                      pulse={!!info?.gemini?.configured}
+                    />
+                    {info?.gemini?.configured ? info.gemini.model : "Not configured"}
+                  </span>
+                </div>
+                {runtime?.torch && (
+                  <div className="si__status">
+                    <Cpu size={15} />
+                    <span>Runtime</span>
+                    <span className="si__statusval mono">
+                      torch {runtime.torch} · py {runtime.python}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+          </GlassCard>
+
+          {/* ---------- similarity galleries ---------- */}
+          {galleries.length > 0 && (
+            <GlassCard>
+              <SectionHeader
+                title="Similarity galleries"
+                subtitle="Each gallery is bound to the encoder that built it; a query from any other model is refused rather than answered."
+                level={3}
+              />
+              <div className="si__statuslist">
+                {galleries.map((g) => (
+                  <div className="si__status" key={g.dataset}>
+                    <span className="mono">{g.encoder}</span>
+                    <span className="si__statusval">
+                      {g.gallery_size.toLocaleString()} images · {g.gallery_split} split
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="si__note">
+                Neighbours are visually similar images, not a verdict on the query. Their labels
+                describe them, never the seed you uploaded.
+              </p>
+            </GlassCard>
+          )}
+        </div>
       </div>
 
       {/* ---------- capability matrix ---------- */}

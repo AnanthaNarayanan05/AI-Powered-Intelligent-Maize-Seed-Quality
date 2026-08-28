@@ -18,9 +18,12 @@ const STAGES = [
   "Detecting seeds",
   "Cropping individual seeds",
   "Classifying variety",
-  "Classifying defect pattern",
+  // one unified model produces the variety and the quality grade in the same pass;
+  // the synthetic defect-pattern classifier this line named is no longer served
+  "Grading kernel quality",
+  "Checking the grade against the training distribution",
   "Generating feature embedding",
-  "Searching similarity index",
+  "Searching similarity gallery",
 ];
 
 export default function ProcessingSequence({ done = false }) {

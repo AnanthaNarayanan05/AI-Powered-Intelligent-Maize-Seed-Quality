@@ -118,9 +118,12 @@ export default function Layout() {
 
         <div className="sidebar__foot">
           <p className="sidebar__note">
+            {/* No metric is quoted here: this component only has /api/health, and a
+                number copied into the chrome drifts the moment a model is retrained.
+                The live figures live on the System information page. */}
             Kernel quality is graded by a model trained on{" "}
-            <strong>expert-assigned Good/Bad labels</strong> (97.3% test accuracy).
-            Grades on imagery unlike its training set are marked{" "}
+            <strong>expert-assigned Good/Bad labels</strong>. Grades on imagery unlike
+            its training set are marked{" "}
             <strong>unverified</strong> rather than reported as defects.
           </p>
         </div>
