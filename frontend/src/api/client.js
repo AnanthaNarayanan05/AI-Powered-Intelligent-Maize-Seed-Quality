@@ -51,7 +51,9 @@ export const api = {
     return fetch(`${BASE_URL}/api/detect`, { method: "POST", body: form }).then(handle);
   },
 
-  similarity: (file, varietyDataset = "a", topK = 5) => {
+  // Defaults to the unified model's own gallery: neighbours must come from the
+  // feature space of the model that made the prediction they are shown beside.
+  similarity: (file, varietyDataset = "unified", topK = 5) => {
     const form = new FormData();
     form.append("file", file);
     form.append("variety_dataset", varietyDataset);

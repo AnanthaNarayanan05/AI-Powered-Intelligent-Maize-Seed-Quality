@@ -2,9 +2,9 @@
 
     input image -> validate -> YOLO detect -> (no seeds? early return) ->
     bounding boxes + count -> crop each seed -> for each crop:
-        variety classification (dataset A or B model, selectable)
+        variety + quality classification (unified model; a/b kept for ablation)
         synthetic defect classification (clearly labeled synthetic)
-        embedding + similarity search
+        embedding + similarity search (same model's gallery index)
         Grad-CAM (best-effort, non-fatal if it fails)
     -> aggregate -> return structured, JSON-serializable result
 
@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.similarity.embedding_index import IndexEncoderMismatch
 from src.utils.config import load_config, get_device
 from src.utils.logging_utils import get_logger
 
@@ -259,17 +260,37 @@ class AnalysisPipeline:
             self._synthetic_model = (model, SYNTHETIC_CLASSES)
         return self._synthetic_model
 
+    def _get_similarity_encoder(self, dataset: str):
+        """The model whose feature space a similarity query lives in.
+
+        This must be the same model that produced the prediction shown next to the
+        neighbours, otherwise the UI puts two unrelated feature spaces side by side.
+        """
+        from src.similarity.embedding_index import encoder_id
+
+        if dataset == "unified":
+            model, _v, _q = self._get_unified_model()
+            return model, encoder_id("unified")
+        experiment = self._resolve_experiment(dataset, "full")
+        model, _classes = self._get_variety_model(dataset, experiment)
+        return model, encoder_id(dataset, experiment)
+
     def _get_faiss_index(self, dataset: str):
         if dataset not in self._faiss_indices:
-            from src.similarity.embedding_index import EmbeddingIndex
+            from src.similarity.embedding_index import EmbeddingIndex, index_path
 
-            path = self.cfg["paths"][f"faiss_index_{dataset}"].rsplit(".index", 1)[0]
+            path = index_path(self.cfg, dataset)
             if not os.path.exists(path + ".faiss"):
                 raise ModelNotAvailableError(
-                    f"Similarity index for dataset '{dataset}' not found. Run src/similarity/build_index.py locally first."
+                    f"Similarity index for dataset '{dataset}' not found. "
+                    f"Run: python -m src.similarity.build_index --dataset {dataset}"
                 )
-            model, _classes = self._get_variety_model(dataset)
-            self._faiss_indices[dataset] = EmbeddingIndex.load(path, dim=model.feature_dim)
+            model, encoder = self._get_similarity_encoder(dataset)
+            # dim + encoder name are both checked: two different models can emit
+            # embeddings of the same width, so width alone proves nothing.
+            self._faiss_indices[dataset] = EmbeddingIndex.load(
+                path, dim=model.feature_dim, encoder=encoder
+            )
         return self._faiss_indices[dataset]
 
     # ---------- stages ----------
@@ -369,9 +390,14 @@ class AnalysisPipeline:
         }
 
     def embed_and_search(self, crop_image, dataset: str, top_k: int = 5):
+        """Nearest gallery images in the encoder's feature space.
+
+        VISUAL SIMILARITY only: a neighbour's label describes that neighbour, and is
+        never merged into the query's own prediction.
+        """
         import torch
 
-        model, _classes = self._get_variety_model(dataset)
+        model, _encoder = self._get_similarity_encoder(dataset)
         tf = self._get_eval_transform()
         tensor = tf(crop_image).unsqueeze(0).to(self.device)
         with torch.no_grad():
@@ -492,14 +518,17 @@ class AnalysisPipeline:
                     result["warnings"].append(str(e))
 
             if run_similarity:
+                # Search the gallery belonging to the model that just made the
+                # prediction. There is deliberately no fallback to another dataset's
+                # index: neighbours drawn from a 3-variety gallery cannot describe a
+                # kernel the 6-variety model just classified.
                 try:
-                    # FAISS indices were built per source dataset; the unified model
-                    # has no index of its own yet, so similarity falls back to A.
-                    sim_ds = "a" if variety_dataset == "unified" else variety_dataset
-                    seed_entry["similarity_results"] = self.embed_and_search(crop, sim_ds, top_k)
-                except ModelNotAvailableError as e:
+                    seed_entry["similarity_results"] = self.embed_and_search(
+                        crop, variety_dataset, top_k
+                    )
+                except (ModelNotAvailableError, IndexEncoderMismatch, KeyError) as e:
                     seed_entry["similarity_results"] = []
-                    result["warnings"].append(str(e))
+                    result["warnings"].append(f"Similarity unavailable: {e}")
 
             result["seeds"].append(seed_entry)
 

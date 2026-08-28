@@ -73,7 +73,9 @@ class SimilarityResult(Base):
     analysis_id = Column(String, ForeignKey("analyses.id"))
     seed_index = Column(Integer)
     embedding_model = Column(String)
-    top_k_results = Column(JSON)  # list of {path,label,similarity_score}
+    # list of {path,variety_label,quality_label,source,distance,similarity_score};
+    # labels belong to the neighbour images, never to the analysed seed
+    top_k_results = Column(JSON)
 
     analysis = relationship("Analysis", back_populates="similarities")
 

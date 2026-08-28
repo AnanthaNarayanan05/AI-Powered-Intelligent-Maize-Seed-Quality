@@ -36,6 +36,19 @@ const VARIETIES = [
 
 const pretty = (s) => (s ? s.replace(/_/g, " ") : "—");
 
+// A gallery neighbour carries whichever labels its source dataset actually had. The
+// quality-only images in the unified gallery have no variety at all, and inventing
+// one for them (from the query's prediction, or from the nearest labelled neighbour)
+// would turn a display detail into a fabricated label. Say "not labelled" instead.
+function simLabels(s) {
+  const variety = s.variety_label ?? s.label ?? null;
+  return {
+    primary: variety ? pretty(variety) : "Variety not labelled",
+    primaryMissing: !variety,
+    quality: s.quality_label ? pretty(s.quality_label) : null,
+  };
+}
+
 export default function Analyze() {
   const [files, setFiles] = useState([]);
   const [dataset] = useState("unified");
@@ -451,33 +464,45 @@ export default function Analyze() {
                 <GlassCard>
                   <SectionHeader
                     title="Visual memory"
-                    subtitle="Nearest matches in feature space. This is visual similarity, not certification or ground-truth matching."
+                    subtitle="Nearest training images in this model's feature space. Visual similarity only — the labels below belong to those neighbour images, not to the analysed seed."
                     level={3}
                   />
                   <div className="simstrip">
-                    {active.similarity_results.map((s, i) => (
-                      <motion.div
-                        className="simcard"
-                        key={`${s.path}-${i}`}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.35, delay: 0.06 * i }}
-                      >
-                        <div className="simcard__imgwrap">
-                          {/* Not lazy-loaded: these are part of the result the user
-                              just requested and there are only top-k of them. */}
-                          <img
-                            src={mediaUrl(s.path, 220)}
-                            alt={`Similar seed ${i + 1}: ${pretty(s.label)}`}
-                          />
-                          <span className="simcard__rank mono">{i + 1}</span>
-                        </div>
-                        <span className="simcard__label">{pretty(s.label)}</span>
-                        <span className="simcard__score mono faint">
-                          d={s.distance?.toFixed(1)}
-                        </span>
-                      </motion.div>
-                    ))}
+                    {active.similarity_results.map((s, i) => {
+                      const { primary, primaryMissing, quality } = simLabels(s);
+                      return (
+                        <motion.div
+                          className="simcard"
+                          key={`${s.path}-${i}`}
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.35, delay: 0.06 * i }}
+                        >
+                          <div className="simcard__imgwrap">
+                            {/* Not lazy-loaded: these are part of the result the user
+                                just requested and there are only top-k of them. */}
+                            <img
+                              src={mediaUrl(s.path, 220)}
+                              alt={`Gallery neighbour ${i + 1}: ${primary}`}
+                            />
+                            <span className="simcard__rank mono">{i + 1}</span>
+                          </div>
+                          <span
+                            className={
+                              primaryMissing
+                                ? "simcard__label simcard__label--none"
+                                : "simcard__label"
+                            }
+                          >
+                            {primary}
+                          </span>
+                          {quality && <span className="simcard__label faint">{quality}</span>}
+                          <span className="simcard__score mono faint">
+                            d={s.distance?.toFixed(1)}
+                          </span>
+                        </motion.div>
+                      );
+                    })}
                   </div>
                 </GlassCard>
               )}

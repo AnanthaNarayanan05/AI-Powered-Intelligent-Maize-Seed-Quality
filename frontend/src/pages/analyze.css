@@ -371,3 +371,11 @@
   color: var(--ink-muted);
   line-height: 1.55;
 }
+
+/* A gallery neighbour whose source dataset never carried a variety label. Rendered
+   as absent rather than blank so it cannot be misread as a real class name. */
+.simcard__label--none {
+  font-style: italic;
+  text-transform: none;
+  opacity: 0.65;
+}

@@ -20,6 +20,7 @@ paths:
   database: database/app.db
   faiss_index_a: outputs/checkpoints/faiss_variety_a.index
   faiss_index_b: outputs/checkpoints/faiss_variety_b.index
+  faiss_index_unified: outputs/checkpoints/faiss_seed_unified.index
 
 dataset_a:
   name: corn_3_classes

@@ -31,10 +31,20 @@ class SyntheticDefectPrediction(BaseModel):
 
 
 class SimilarityMatch(BaseModel):
+    """One gallery neighbour. VISUAL SIMILARITY only.
+
+    The labels describe the neighbour image, not the query, and they are null when
+    the neighbour's source dataset never carried that label — the quality-only
+    subset of the unified gallery has no variety, and none is inferred for it.
+    """
+
     path: str
-    label: str
-    distance: float
-    similarity_score: float
+    variety_label: Optional[str] = None
+    quality_label: Optional[str] = None
+    source: Optional[str] = None
+    label: Optional[str] = None  # legacy alias for variety_label
+    distance: float  # L2 in the encoder's feature space; lower = nearer
+    similarity_score: float  # 1/(1+distance): monotone display rescaling, not a probability
 
 
 class SeedAnalysisResult(BaseModel):

@@ -116,8 +116,19 @@ def test_synthetic_defect_output_is_always_labelled_synthetic():
     assert pred["model"] == "synthetic_defect_classifier"
 
 
+needs_unified_model = pytest.mark.skipif(
+    not _has("unified_seed_model_best.pt"), reason="unified model not trained"
+)
+needs_index_a = pytest.mark.skipif(
+    not _has("faiss_variety_a.faiss"), reason="FAISS index A not built"
+)
+needs_index_unified = pytest.mark.skipif(
+    not _has("faiss_seed_unified.faiss"), reason="unified FAISS index not built"
+)
+
+
 @needs_image
-@pytest.mark.skipif(not _has("faiss_variety_a.faiss"), reason="FAISS index A not built")
+@needs_index_a
 def test_similarity_search_returns_ranked_neighbours():
     r = client.post("/api/similarity", files=_upload(REAL_IMAGE), data={"variety_dataset": "a", "top_k": 5})
     assert r.status_code == 200, r.text
@@ -129,9 +140,139 @@ def test_similarity_search_returns_ranked_neighbours():
     assert distances == sorted(distances), "neighbours must come back nearest-first"
 
 
-needs_unified = pytest.mark.skipif(
-    not _has("unified_seed_model_best.pt"), reason="unified model not trained"
-)
+@needs_image
+@needs_index_unified
+def test_similarity_endpoint_serves_the_unified_gallery():
+    """Regression: the endpoint used to 400 on the platform's own default model."""
+    r = client.post(
+        "/api/similarity", files=_upload(REAL_IMAGE), data={"variety_dataset": "unified", "top_k": 4}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["encoder"] == "unified_seed_model"
+    assert body["gallery_size"] > 0
+    assert len(body["results"]) == 4, "top_k must be honoured exactly"
+
+    for n in body["results"]:
+        # every neighbour carries its own provenance, and a label the source dataset
+        # never had stays null instead of being filled in
+        assert set(n) >= {"path", "variety_label", "quality_label", "source", "distance"}
+        assert n["variety_label"] is None or isinstance(n["variety_label"], str)
+        assert n["quality_label"] in (None, "Good", "Bad")
+
+
+@needs_image
+def test_similarity_endpoint_rejects_an_unknown_gallery_rather_than_substituting_one():
+    for data, expected in [
+        ({"variety_dataset": "zzz"}, "variety_dataset"),
+        ({"top_k": 0}, "top_k"),
+        ({"top_k": 999}, "top_k"),
+    ]:
+        r = client.post("/api/similarity", files=_upload(REAL_IMAGE), data=data)
+        assert r.status_code == 400, f"{data} -> {r.status_code} {r.text}"
+        assert expected in r.json()["detail"]
+
+
+@needs_index_a
+@needs_index_unified
+def test_index_refuses_to_be_queried_by_a_different_encoder():
+    """The core Phase 13 defect: A's index and the unified model are BOTH 1280-d, so
+    a mismatch produced confident nonsense instead of an error."""
+    from src.similarity.embedding_index import EmbeddingIndex, IndexEncoderMismatch, index_path
+
+    a_path = index_path(cfg, "a")
+    # same width, different feature space -> must be refused on the name, not the dim
+    with pytest.raises(IndexEncoderMismatch):
+        EmbeddingIndex.load(a_path, dim=1280, encoder="unified_seed_model")
+    with pytest.raises(IndexEncoderMismatch):
+        EmbeddingIndex.load(a_path, dim=512, encoder="variety_a_full")
+
+    ok = EmbeddingIndex.load(a_path, dim=1280, encoder="variety_a_full")
+    assert ok.index.ntotal == len(ok.metadata), "vector/metadata mapping must be 1:1"
+
+
+@needs_index_unified
+def test_unified_gallery_is_the_train_split_and_labels_are_never_invented():
+    """The gallery must not contain evaluation images, and the quality-only subset
+    must stay variety-null rather than borrowing a label."""
+    import csv
+
+    from src.similarity.embedding_index import EmbeddingIndex, index_path
+
+    idx = EmbeddingIndex.load(index_path(cfg, "unified"), dim=1280, encoder="unified_seed_model")
+    assert idx.info["gallery_split"] == "train"
+
+    with open(idx.info["gallery_manifest"]) as f:
+        rows = list(csv.DictReader(f))
+    truth = {r["filepath"]: r for r in rows}
+    held_out = {r["filepath"] for r in rows if r["split"] in ("val", "test")}
+
+    assert len(idx.metadata) == sum(1 for r in rows if r["split"] == "train")
+    for m in idx.metadata:
+        assert m["path"] not in held_out, f"evaluation image in the gallery: {m['path']}"
+        row = truth[m["path"]]
+        # every stored label is the manifest's, verbatim; blanks stay None
+        assert m["variety_label"] == (row["variety_label"].strip() or None)
+        assert m["quality_label"] == (row["quality_label"].strip() or None)
+
+    assert any(m["variety_label"] is None for m in idx.metadata), (
+        "the quality-only subset should be present and variety-null"
+    )
+
+
+@needs_image
+@needs_unified_model
+@needs_index_unified
+def test_pipeline_searches_the_gallery_of_the_model_that_made_the_prediction():
+    """Regression: analyze_image used to answer unified queries from dataset A's
+    3-variety gallery, so a seed predicted WangDataa got neighbours from a gallery
+    that structurally could not contain WangDataa."""
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    pipeline = AnalysisPipeline()
+    result = pipeline.analyze_image(REAL_IMAGE, variety_dataset="unified", top_k=3)
+    assert result["warnings"] == [], result["warnings"]
+    assert result["seeds"]
+
+    gallery = pipeline._get_faiss_index("unified")
+    assert gallery.info["encoder"] == "unified_seed_model"
+
+    a_paths = {m["path"] for m in pipeline._get_faiss_index("a").metadata}
+    unified_paths = {m["path"] for m in gallery.metadata}
+    assert unified_paths - a_paths, "fixture precondition: the two galleries must differ"
+
+    for seed in result["seeds"]:
+        assert len(seed["similarity_results"]) == 3
+        d = [n["distance"] for n in seed["similarity_results"]]
+        assert d == sorted(d)
+        for n in seed["similarity_results"]:
+            # drawn from the unified gallery, never from A's 3-variety one
+            assert n["path"] in unified_paths
+
+    # Which of those images a given photograph actually retrieves is a property of
+    # the photograph, so it is not asserted. What must hold is that there is no
+    # fallback left: a gallery that does not exist is reported, never substituted.
+    with pytest.raises(Exception):
+        pipeline._get_faiss_index("no_such_dataset")
+
+
+@needs_image
+@needs_unified_model
+@needs_index_unified
+def test_similarity_never_writes_a_neighbour_label_onto_the_query():
+    """Neighbour labels are evidence about the neighbours. The seed's own prediction
+    must come from the classifier alone."""
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    pipeline = AnalysisPipeline()
+    result = pipeline.analyze_image(REAL_IMAGE, variety_dataset="unified", top_k=5)
+    for seed in result["seeds"]:
+        assert seed["variety_prediction"]["model"] == "unified_seed_model"
+        assert "similarity" not in seed["variety_prediction"]
+        assert "neighbour" not in str(seed["variety_prediction"]).lower()
+
+
+needs_unified = needs_unified_model
 needs_variety_a = pytest.mark.skipif(
     not _has("variety_a_full_best.pt"), reason="variety model A not trained"
 )

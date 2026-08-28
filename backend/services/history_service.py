@@ -6,6 +6,7 @@ import datetime
 
 from database.db import session_scope
 from database.models import Analysis, Detection, Classification, SimilarityResult, BatchAnalysis
+from src.similarity.embedding_index import encoder_id
 
 
 def _iso_utc(value: datetime.datetime | None) -> str | None:
@@ -73,7 +74,10 @@ def save_analysis_result(result: dict, variety_dataset: str, image_filename: str
             if seed.get("similarity_results"):
                 db.add(SimilarityResult(
                     analysis_id=analysis.id, seed_index=seed["seed_index"],
-                    embedding_model=f"variety_{variety_dataset}", top_k_results=seed["similarity_results"],
+                    # record WHICH encoder produced these neighbours, so a stored
+                    # result stays interpretable after the index is rebuilt
+                    embedding_model=encoder_id(variety_dataset),
+                    top_k_results=seed["similarity_results"],
                 ))
         return analysis.id
 
