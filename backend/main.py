@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.config import CORS_ORIGINS, gemini_is_configured
-from backend.routes import analyze, detect, classify, similarity, history, copilot, media, stats, lot
+from backend.routes import analyze, detect, classify, similarity, history, copilot, media, stats, lot, orchestrate
 from backend.services.system_service import API_VERSION, system_report
 from src.utils.logging_utils import get_logger
 
@@ -51,6 +51,7 @@ app.include_router(copilot.router)
 app.include_router(media.router)
 app.include_router(stats.router)
 app.include_router(lot.router)
+app.include_router(orchestrate.router)
 
 
 @app.get("/api/health")
