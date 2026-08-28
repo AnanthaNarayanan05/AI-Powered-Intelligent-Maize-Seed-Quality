@@ -14,12 +14,20 @@ import {
 import "./systeminfo.css";
 
 /* Nothing about the model stack is written into this file. It is read from
-   /api/system-info, which probes checkpoints, evaluation JSON and index sidecars on
-   every request — the previous hard-coded table went on advertising "Datasets A & B
-   · 3 classes each" for weeks after one 6-variety model replaced both. */
+   /api/system-info, which resolves the model list from configs/model_registry.yaml
+   and probes checkpoints, evaluation JSON and index sidecars on every request — the
+   previous hard-coded table went on advertising "Datasets A & B · 3 classes each"
+   for weeks after one 6-variety model replaced both. */
 
 const STATUS_TONE = { ready: "ok", available: "neutral", missing: "warn" };
 const STATUS_LABEL = { ready: "Serving", available: "Trained", missing: "Not on this machine" };
+
+/* A metric is only evidence about a checkpoint if it can be shown to have been
+   measured on THAT checkpoint. The backend compares the hash training recorded
+   against the file on disk; anything short of a match is labelled here rather
+   than left to read as a confirmed score. */
+const BINDING_TONE = { stale: "error", unrecorded: "warn" };
+const BINDING_LABEL = { stale: "Metrics out of date", unrecorded: "Metrics unverified" };
 
 function ModelRow({ model, index }) {
   return (
@@ -35,14 +43,24 @@ function ModelRow({ model, index }) {
         <span className="si__rowdetail">{model.role}</span>
 
         {model.metrics.length > 0 && (
-          <div className="si__metrics">
-            {model.metrics.map((m) => (
-              <span className="si__metric" key={m.label} title={m.n ? `n = ${m.n}` : undefined}>
-                <span className="si__metriclabel">{m.label}</span>
-                <span className="si__metricval mono">{m.value}</span>
+          <>
+            <div className="si__metrics">
+              {model.metrics.map((m) => (
+                <span className="si__metric" key={m.label} title={m.n ? `n = ${m.n}` : undefined}>
+                  <span className="si__metriclabel">{m.label}</span>
+                  <span className="si__metricval mono">{m.value}</span>
+                </span>
+              ))}
+            </div>
+            {BINDING_LABEL[model.metrics_binding] && (
+              <span className="si__rownote">
+                <Badge tone={BINDING_TONE[model.metrics_binding]}>
+                  {BINDING_LABEL[model.metrics_binding]}
+                </Badge>{" "}
+                {model.metrics_note}
               </span>
-            ))}
-          </div>
+            )}
+          </>
         )}
 
         {/* The training script's own caveat, shown verbatim rather than paraphrased. */}
@@ -53,7 +71,8 @@ function ModelRow({ model, index }) {
         )}
 
         <span className="si__rowpath mono" title={model.checkpoint}>
-          {model.checkpoint}
+          v{model.version} · {model.checkpoint}
+          {model.fingerprint ? ` · sha256:${model.fingerprint.slice(0, 10)}` : ""}
         </span>
       </div>
       <Badge
@@ -137,7 +156,7 @@ export default function SystemInfo() {
         <GlassCard>
           <SectionHeader
             title="Model stack"
-            subtitle="Status, metrics and checkpoint paths are probed on this machine at request time."
+            subtitle="Declared in the model registry; status, fingerprints and metrics are probed on this machine at request time."
             level={3}
           />
           {state === "loading" ? (

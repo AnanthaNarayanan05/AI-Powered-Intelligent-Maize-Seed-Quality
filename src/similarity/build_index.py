@@ -65,8 +65,12 @@ def _load_encoder(cfg, dataset: str, experiment: str, device):
 
     if dataset == "unified":
         from src.models.unified_model import UnifiedSeedModel
+        from src.registry import get_registry
 
-        ckpt_path = os.path.join(ckpt_dir, "unified_seed_model_best.pt")
+        # The gallery must be built by the same checkpoint the serving path
+        # loads, or the index is bound to an encoder that never answers a query.
+        # Asking the registry is what guarantees they are the same file.
+        ckpt_path = get_registry().resolve("embedding").checkpoint
         state = torch.load(ckpt_path, map_location=device)
         model = UnifiedSeedModel(
             state["variety_classes"], state["quality_classes"],
@@ -79,6 +83,9 @@ def _load_encoder(cfg, dataset: str, experiment: str, device):
 
     from src.models.variety_classifier import CognitiveAttentionClassifier
 
+    # Ablation encoders are addressed by path, not by the registry: they are the
+    # variants the registry deliberately does not serve, and their indices exist
+    # only to reproduce the comparison.
     ds_cfg = cfg["dataset_a"] if dataset == "a" else cfg["dataset_b"]
     ckpt_path = os.path.join(ckpt_dir, f"variety_{dataset}_{experiment}_best.pt")
     state = torch.load(ckpt_path, map_location=device)

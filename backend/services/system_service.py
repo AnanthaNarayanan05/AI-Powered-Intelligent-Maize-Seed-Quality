@@ -20,103 +20,11 @@ import os
 import platform
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from backend.config import GEMINI_MODEL, gemini_is_configured
-from src.utils.config import load_config
-
-# ---------------------------------------------------------------- model specs
-# Only the identity of an artefact is written here (where it lives, what it is,
-# whether the serving path uses it). Everything measurable is read from disk.
-_MODEL_SPECS = [
-    {
-        "key": "detection",
-        "name": "Seed detection",
-        "architecture": "YOLOv8n",
-        "role": "Locates and counts individual kernels (single class: Corn).",
-        "checkpoint": "detection_corn/weights/best.pt",
-        "metrics": "detection",
-        "served": True,
-    },
-    {
-        "key": "unified_seed_model",
-        "name": "Variety + kernel quality",
-        "architecture": "EfficientNet-B0 + cognitive attention, two heads",
-        "role": "One pass produces the variety prediction and the Good/Bad grade.",
-        "checkpoint": "unified_seed_model_best.pt",
-        "metrics": "unified_seed_model",
-        "served": True,
-    },
-    {
-        "key": "contrastive_encoder",
-        "name": "Contrastive pretraining",
-        "architecture": "SimCLR / NT-Xent",
-        "role": "Initialises the unified model's backbone; not served on its own.",
-        "checkpoint": "contrastive_encoder_unified_unified.pt",
-        "metrics": None,
-        "served": False,
-    },
-    {
-        "key": "quality_gate",
-        "name": "Quality distribution gate",
-        "architecture": "kNN cosine distance to the training feature bank",
-        "role": (
-            "Marks grades on imagery unlike the training data as unverified "
-            "instead of reporting them as defects."
-        ),
-        "checkpoint": "quality_reference.npz",
-        "metrics": "quality_gate_comparison",
-        "served": True,
-    },
-    {
-        "key": "variety_a_full",
-        "name": "Variety model A (ablation)",
-        "architecture": "EfficientNet-B0 + cognitive attention, 3 classes",
-        "role": (
-            "Superseded by the unified model. Kept reachable so the "
-            "contrastive/attention ablation stays reproducible."
-        ),
-        "checkpoint": "variety_a_full_best.pt",
-        "metrics": "variety_a_full",
-        "served": False,
-    },
-    {
-        "key": "variety_b_full_grouped",
-        "name": "Variety model B (ablation)",
-        "architecture": "EfficientNet-B0 + cognitive attention, 3 classes",
-        "role": (
-            "Superseded by the unified model. Group-aware splits; kept for the "
-            "same ablation."
-        ),
-        "checkpoint": "variety_b_full_grouped_best.pt",
-        "metrics": "variety_b_full_grouped",
-        "served": False,
-    },
-    {
-        "key": "synthetic_defect_classifier",
-        "name": "Synthetic defect classifier",
-        "architecture": "EfficientNet-B0 + cognitive attention, 4 classes",
-        "role": (
-            "Trained on defects this project painted. Demonstration only, "
-            "disabled in the serving path, never a real-world result."
-        ),
-        "checkpoint": "synthetic_defect_classifier_best.pt",
-        "metrics": "synthetic_defect",
-        "served": False,
-    },
-    {
-        "key": "defect_segmenter_synthetic",
-        "name": "Defect segmenter (synthetic)",
-        "architecture": "EfficientNet-B0 encoder + U-Net decoder",
-        "role": (
-            "Trained on painted defects. Establishes the resolution floor only; "
-            "it is not evidence about real defects and is not served."
-        ),
-        "checkpoint": "defect_segmenter_synthetic_best.pt",
-        "metrics": "defect_segmenter_synthetic",
-        "served": False,
-    },
-]
-
+from src.registry import get_registry
+from src.utils.config import PROJECT_ROOT, load_config
 
 def _pct(value) -> str:
     return f"{float(value) * 100:.1f}%"
@@ -169,14 +77,6 @@ def _headline(key: str, m: dict) -> list[dict]:
     return []
 
 
-def _classes(m: dict) -> dict | None:
-    out = {}
-    for field in ("variety_classes", "quality_classes", "classes", "channels"):
-        if isinstance(m.get(field), list):
-            out[field] = m[field]
-    return out or None
-
-
 def _read_json(path: str) -> dict | None:
     try:
         with open(path, encoding="utf-8") as f:
@@ -185,53 +85,58 @@ def _read_json(path: str) -> dict | None:
         return None
 
 
-def _mtime(path: str) -> str | None:
+# How trustworthy the reported numbers are, in the words a reader needs rather
+# than the registry's one-word state. "unrecorded" deliberately does not say the
+# metrics match -- it says nobody wrote down enough to tell.
+_BINDING_NOTE = {
+    "verified": None,
+    "stale": (
+        "These metrics were produced by a different build of this checkpoint. "
+        "The model was retrained without being re-evaluated, so they do not "
+        "describe the weights currently on disk."
+    ),
+    "unrecorded": (
+        "This evaluation predates checkpoint fingerprinting, so it cannot be "
+        "confirmed to describe the checkpoint currently on disk."
+    ),
+    "missing": None,
+}
+
+
+def _display_path(path: str | None) -> str | None:
+    """Project-relative, forward-slashed. The registry works in absolute paths so
+    it can stat them; the page has no use for this machine's directory layout."""
+    if not path:
+        return path
     try:
-        stamp = datetime.fromtimestamp(os.path.getmtime(path), timezone.utc)
-    except OSError:
-        return None
-    return stamp.isoformat(timespec="seconds")
+        path = str(Path(path).relative_to(PROJECT_ROOT))
+    except ValueError:
+        pass
+    return path.replace("\\", "/")
 
 
-def _models(cfg: dict) -> list[dict]:
-    ckpt_dir = cfg["paths"]["checkpoints"]
-    metrics_dir = cfg["paths"]["metrics"]
+def _models() -> list[dict]:
+    """One row per registry entry, with metrics formatted for display.
+
+    This function used to carry its own table of model names, architectures,
+    checkpoint paths and served flags. That was a second answer to "which model
+    does the platform serve", kept in step with configs/model_registry.yaml by
+    hand -- which is to say, not kept in step. Identity is now read from the
+    registry and only the presentation happens here.
+
+    refresh=True re-probes the filesystem on every request, which is the whole
+    point of this endpoint; hashes and class lists are cached against file
+    identity, so an unchanged checkpoint costs a stat() rather than a re-read.
+    """
     out = []
-    for spec in _MODEL_SPECS:
-        ckpt = os.path.join(ckpt_dir, spec["checkpoint"])
-        present = os.path.exists(ckpt)
-        metrics_file = (
-            os.path.join(metrics_dir, spec["metrics"] + ".json") if spec["metrics"] else None
-        )
-        m = _read_json(metrics_file) if metrics_file else None
-        # A model is only "ready" if its weights are on this machine. Reporting a
-        # trained-elsewhere model as available is how a page starts describing
-        # something the server cannot actually do.
-        if not present:
-            status = "missing"
-        elif spec["served"]:
-            status = "ready"
-        else:
-            status = "available"
-        out.append(
-            {
-                "key": spec["key"],
-                "name": spec["name"],
-                "architecture": spec["architecture"],
-                "role": spec["role"],
-                "checkpoint": ckpt.replace("\\", "/"),
-                "status": status,
-                "served": spec["served"],
-                "trained_at": _mtime(ckpt) if present else None,
-                "metrics": _headline(spec["key"], m) if m else [],
-                "metrics_file": metrics_file.replace("\\", "/") if m else None,
-                "classes": _classes(m) if m else None,
-                "label_provenance": (m or {}).get("label_provenance"),
-                # The training script's own caveat, carried through verbatim rather
-                # than being re-worded in the UI.
-                "note": (m or {}).get("label_note") or (m or {}).get("note"),
-            }
-        )
+    for record in get_registry(refresh=True).all():
+        row = record.as_dict()
+        row["checkpoint"] = _display_path(row["checkpoint"])
+        row["metrics_file"] = _display_path(row["metrics_file"])
+        # the raw metrics blob is not shipped; the UI gets the headline figures
+        row["metrics"] = _headline(record.key, record.metrics) if record.metrics else []
+        row["metrics_note"] = _BINDING_NOTE.get(record.metrics_binding)
+        out.append(row)
     return out
 
 
@@ -365,7 +270,7 @@ def system_report() -> dict:
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         "runtime": _runtime(),
-        "models": _models(cfg),
+        "models": _models(),
         "similarity_indices": _similarity_indices(cfg),
         "database": _database(cfg),
         # Name of the selected model only. The key itself never leaves the server.

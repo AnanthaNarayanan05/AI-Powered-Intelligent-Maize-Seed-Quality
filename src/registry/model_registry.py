@@ -46,6 +46,13 @@ REGISTRY_PATH = PROJECT_ROOT / "configs" / "model_registry.yaml"
 # identity (size + mtime). A rewritten checkpoint changes both and is re-hashed.
 _HASH_CACHE: dict[tuple[str, int, float], str] = {}
 
+# Same trick, same reason: reading a class list means torch.load-ing the whole
+# checkpoint. Keyed on file identity so a refresh re-reads only what changed,
+# which is what lets /api/system-info re-probe on every request without paying
+# for it. The sentinel distinguishes "cached: this artefact has no class list"
+# from "not cached yet".
+_CLASSES_CACHE: dict[tuple[str, int, float], list[str] | None] = {}
+
 
 class UnknownModelError(KeyError):
     """Asked for a model key the registry does not declare."""
@@ -96,8 +103,21 @@ def _classes_from_checkpoint(path: Path, task: str) -> list[str] | None:
     genuinely carries no class list (the contrastive encoder has no head at all,
     and the YOLO weights are read by ultralytics, not us).
     """
-    if path.suffix != ".pt" or not path.exists():
+    if path.suffix != ".pt":
         return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    cache_key = (str(path), st.st_size, st.st_mtime)
+    if cache_key in _CLASSES_CACHE:
+        return _CLASSES_CACHE[cache_key]
+    classes = _read_classes(path)
+    _CLASSES_CACHE[cache_key] = classes
+    return classes
+
+
+def _read_classes(path: Path) -> list[str] | None:
     try:
         import torch
 
@@ -146,7 +166,7 @@ class ModelRecord:
     fingerprint: str | None = None
     classes: list[str] | None = None
     metrics: dict | None = None
-    metrics_binding: str = "unrecorded"
+    metrics_binding: str = "missing"
     note: str | None = None
 
     @property
@@ -304,7 +324,6 @@ def _hydrate(spec: dict, ckpt_root: Path, metrics_root: Path) -> ModelRecord:
 
     if metrics_path is not None:
         record.metrics = _read_json(metrics_path)
-        record.metrics_binding = _binding(record)
         if record.metrics:
             # the training script's own caveat, carried through verbatim rather
             # than being re-worded downstream
@@ -313,6 +332,11 @@ def _hydrate(spec: dict, ckpt_root: Path, metrics_root: Path) -> ModelRecord:
                 record.metrics.get("label_provenance") or record.label_provenance
             )
 
+    # Computed unconditionally: a model that declares no metrics file at all must
+    # read "missing", not "unrecorded". "unrecorded" is a statement about an
+    # evaluation that exists but cannot be tied to a checkpoint, and claiming it
+    # where no evaluation exists would overstate what is on disk.
+    record.metrics_binding = _binding(record)
     return record
 
 
