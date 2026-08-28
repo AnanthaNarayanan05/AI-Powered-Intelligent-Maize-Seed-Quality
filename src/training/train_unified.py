@@ -32,6 +32,7 @@ from src.contrastive.simclr import build_eval_transform, build_simclr_augmentati
 from src.data.datasets import UnifiedSeedDataset
 from src.models.unified_model import UnifiedSeedModel
 from src.utils.config import load_config, get_device
+from src.registry.model_registry import checkpoint_sha256
 from src.utils.seed import set_seed
 from src.utils.logging_utils import get_logger
 
@@ -208,6 +209,10 @@ def main():
                             (("train", train_ds), ("val", val_ds), ("test", test_ds))},
             "best_val_mean_f1": best_score,
             "test_metrics": test,
+            # Binds these numbers to the artefact that produced them. The registry
+            # recomputes it; retraining without re-evaluating shows up as a stale
+            # binding instead of the old score being reported for the new model.
+            "checkpoint_sha256": checkpoint_sha256(best_path),
         }, f, indent=2)
 
     for head, m in test.items():

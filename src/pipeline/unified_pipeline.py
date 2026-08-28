@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.registry import TaskUnavailableError, get_registry
 from src.similarity.embedding_index import IndexEncoderMismatch
 from src.utils.config import load_config, get_device
 from src.utils.logging_utils import get_logger
@@ -56,6 +57,7 @@ class AnalysisPipeline:
         self._quality_reference = None
         self._synthetic_model = None
         self._faiss_indices: dict[str, object] = {}
+        self._registry = None
         self._eval_transform = None
 
     @property
@@ -63,6 +65,30 @@ class AnalysisPipeline:
         if self._device is None:
             self._device = get_device(self.cfg["device"]["prefer"])
         return self._device
+
+    @property
+    def registry(self):
+        """configs/model_registry.yaml — which model answers which task."""
+        if self._registry is None:
+            self._registry = get_registry()
+        return self._registry
+
+    def _checkpoint_for(self, task: str) -> str:
+        """The checkpoint that serves `task`, resolved through the registry.
+
+        Model choice does not live in this file. A path spelled out here would be
+        a second answer to "which model serves this?" that drifts from the first
+        the moment a model is renamed or retrained -- and, worse, would happily
+        serve a task the registry deliberately refuses (the synthetic-defect
+        models declare `serves: []` precisely so they cannot answer a
+        real-world defect question). A task no model serves arrives here as
+        TaskUnavailableError and leaves as ModelNotAvailableError, which the
+        backend already turns into a clear API error rather than a crash.
+        """
+        try:
+            return self.registry.resolve(task).checkpoint
+        except TaskUnavailableError as e:
+            raise ModelNotAvailableError(str(e)) from e
 
     # ---------- lazy loaders ----------
     def _get_eval_transform(self):
@@ -74,11 +100,7 @@ class AnalysisPipeline:
 
     def _get_detection_model(self):
         if self._detection_model is None:
-            weights_path = os.path.join(self.cfg["paths"]["checkpoints"], "detection_corn", "weights", "best.pt")
-            if not os.path.exists(weights_path):
-                raise ModelNotAvailableError(
-                    f"Detection model not found at {weights_path}. Run src/training/train_detection.py locally first."
-                )
+            weights_path = self._checkpoint_for("detect")
             try:
                 from ultralytics import YOLO
             except ImportError as e:
@@ -98,6 +120,12 @@ class AnalysisPipeline:
         'full' checkpoint is missing, fall back through the other trained
         experiments in order of research quality, and say clearly which one was
         actually used instead of mislabeling results."""
+        # Deliberately a filesystem scan rather than a registry lookup. The
+        # registry names the models the platform serves; these are ablation
+        # variants (baseline / attention_only / contrastive_only) that exist only
+        # to reproduce the comparison table, are never used to answer a user's
+        # question, and would clutter the registry with entries whose whole point
+        # is that they must not be served.
         candidates = [requested] + [e for e in self.EXPERIMENT_PREFERENCE if e != requested]
         for exp in candidates:
             ckpt_path = os.path.join(self.cfg["paths"]["checkpoints"], f"variety_{dataset}_{exp}_best.pt")
@@ -150,13 +178,9 @@ class AnalysisPipeline:
                     "Run: pip install torch torchvision"
                 ) from e
 
-            ckpt_path = os.path.join(self.cfg["paths"]["checkpoints"], "unified_seed_model_best.pt")
-            if not os.path.exists(ckpt_path):
-                raise ModelNotAvailableError(
-                    f"Unified seed model not found at {ckpt_path}. "
-                    f"Run: python -m src.training.train_unified "
-                    f"--encoder outputs/checkpoints/contrastive_encoder_unified_unified.pt"
-                )
+            # one record serves all three tasks; resolving any of them is the
+            # same assertion that this model is the platform's declared answer
+            ckpt_path = self._checkpoint_for("variety")
             state = torch.load(ckpt_path, map_location=self.device)
             model = UnifiedSeedModel(
                 state["variety_classes"], state["quality_classes"],
@@ -174,10 +198,14 @@ class AnalysisPipeline:
         the reference was never built, in which case quality is still returned but
         carries no in-distribution claim."""
         if self._quality_reference is None:
-            path = os.path.join(self.cfg["paths"]["checkpoints"], "quality_reference.npz")
-            if not os.path.exists(path):
+            # absence is a supported state here, not an error, so the record is
+            # inspected rather than resolved -- resolve() raises on a missing
+            # checkpoint and quality grading is designed to continue without the gate
+            record = self.registry.get("quality_gate")
+            if not record.available:
                 self._quality_reference = False
             else:
+                path = record.checkpoint
                 z = np.load(path)
                 self._quality_reference = (z["reference"], float(z["threshold"]), int(z["k"]))
         return self._quality_reference or None
@@ -244,13 +272,18 @@ class AnalysisPipeline:
                 ) from e
             from src.data.synthetic_defect_generator import SYNTHETIC_CLASSES
 
-            ckpt_path = os.path.join(self.cfg["paths"]["checkpoints"], "synthetic_defect_classifier_best.pt")
-            if not os.path.exists(ckpt_path):
+            # Fetched by key, never resolved by task: this model declares
+            # serves: [] in the registry, so it can only be reached by a caller
+            # that explicitly asked for it (run_synthetic_defect=True) and gets a
+            # prediction stamped is_synthetic_model. registry.resolve() will not
+            # hand it to anyone asking about real defects.
+            record = self.registry.get("synthetic_defect_classifier")
+            if not record.present:
                 raise ModelNotAvailableError(
-                    f"Synthetic defect model not found at {ckpt_path}. "
-                    f"Run src/training/train_synthetic_defect.py locally first."
+                    f"Synthetic defect model not found at {record.checkpoint}. "
+                    f"Train it with: {record.trained_by}"
                 )
-            state = torch.load(ckpt_path, map_location=self.device)
+            state = torch.load(record.checkpoint, map_location=self.device)
             model = CognitiveAttentionClassifier(
                 num_classes=len(SYNTHETIC_CLASSES), backbone_name=state["backbone"],
                 pretrained=False, use_attention=state["use_attention"],

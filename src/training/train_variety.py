@@ -28,6 +28,7 @@ from sklearn.metrics import (
 from src.data.datasets import VarietyImageDataset
 from src.contrastive.simclr import build_eval_transform, build_simclr_augmentation
 from src.models.variety_classifier import CognitiveAttentionClassifier
+from src.registry.model_registry import checkpoint_sha256
 from src.utils.config import load_config, get_device
 from src.utils.seed import set_seed
 from src.utils.logging_utils import get_logger
@@ -281,6 +282,7 @@ def main():
             "best_val_f1_macro": best_val_f1,
             "test_metrics": test_metrics,
             "group_level": group_metrics,
+            "checkpoint_sha256": checkpoint_sha256(best_ckpt_path),
         }, f, indent=2)
 
     logger.info(f"Test accuracy: {test_metrics['accuracy']:.4f}  Test F1 (macro): {test_metrics['f1_macro']:.4f}")

@@ -28,6 +28,7 @@ from src.data.group_split import split_groups
 from src.data.synthetic_defect_generator import SYNTHETIC_CLASSES
 from src.contrastive.simclr import build_eval_transform, build_simclr_augmentation
 from src.models.variety_classifier import CognitiveAttentionClassifier
+from src.registry.model_registry import checkpoint_sha256
 from src.utils.config import load_config, get_device
 from src.utils.seed import set_seed
 from src.utils.logging_utils import get_logger
@@ -186,7 +187,9 @@ def main():
     model.load_state_dict(state["model_state_dict"])
     test_metrics = evaluate(model, test_loader, device, SYNTHETIC_CLASSES)
     with open(os.path.join(cfg["paths"]["metrics"], "synthetic_defect.json"), "w") as f:
-        json.dump({"best_val_f1_macro": best_val_f1, "test_metrics": test_metrics, "note": "SYNTHETIC labels — see docs/06_SYNTHETIC_DEFECT_POLICY.md"}, f, indent=2)
+        json.dump({"best_val_f1_macro": best_val_f1, "test_metrics": test_metrics,
+                   "checkpoint_sha256": checkpoint_sha256(best_ckpt_path),
+                   "note": "SYNTHETIC labels — see docs/06_SYNTHETIC_DEFECT_POLICY.md"}, f, indent=2)
 
     logger.info(f"[SYNTHETIC] Test accuracy: {test_metrics['accuracy']:.4f}  F1 macro: {test_metrics['f1_macro']:.4f}")
 

@@ -1,0 +1,190 @@
+# Model registry — the single source of truth for WHICH model serves WHICH task.
+#
+# This file declares only what cannot be measured from an artefact: a model's
+# identity, the task it answers, whether the serving path is allowed to use it,
+# and the requirements it places on its input. Everything else -- whether the
+# checkpoint exists, its fingerprint, its class list, its metrics, when it was
+# written -- is read from disk by src/registry/model_registry.py at load time,
+# because a copy written down here would go stale the moment a model is
+# retrained. That is the same rule Phase 14 applied to /api/system-info.
+#
+# `serves` is deliberately explicit rather than inferred from "a checkpoint
+# exists". A trained model is not automatically a servable one: the two defect
+# models below were trained on defects this project painted, and listing them
+# with serves: [] is how the platform refuses to answer a real-world defect
+# question it has no real-world evidence for.
+#
+# Adding a model: add an entry here. Do not add a checkpoint path to a loader.
+
+version: 1
+
+# Canonical task names. A task with no serving model is answered "unavailable",
+# never approximated with a model trained for something else.
+tasks:
+  detect:              Locate and count individual kernels in an image.
+  variety:             Name the maize variety of a single kernel.
+  quality:             Grade a single kernel Good or Bad.
+  distribution_gate:   Decide whether a grade is interpolation or extrapolation.
+  embedding:           Produce the feature vector used for similarity search.
+  defect_segmentation: Produce a pixel mask of the defective region.
+  defect_pattern:      Name the visible defect pattern on a kernel.
+
+models:
+  - key: detection
+    name: Seed detection
+    version: 1.0.0
+    architecture: YOLOv8n
+    task: detect
+    serves: [detect]
+    role: "Locates and counts individual kernels (single class: Corn)."
+    checkpoint: detection_corn/weights/best.pt
+    metrics: detection
+    dataset: dataset_3_detection
+    trained_by: python -m src.training.train_detection
+    input:
+      kind: image
+      image_size: 640
+      colour: RGB
+    # No resolution floor is declared: detection degrades gradually with size and
+    # no floor has been measured for it. Only segmentation has a measured floor.
+    requires_resolution: null
+
+  - key: unified_seed_model
+    name: Variety + kernel quality
+    version: 1.0.0
+    architecture: EfficientNet-B0 + cognitive attention, two heads
+    task: variety
+    serves: [variety, quality, embedding]
+    role: One pass produces the variety prediction and the Good/Bad grade.
+    checkpoint: unified_seed_model_best.pt
+    metrics: unified_seed_model
+    dataset: manifest_unified
+    trained_by: >-
+      python -m src.training.train_unified --encoder
+      outputs/checkpoints/contrastive_encoder_unified_unified.pt
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    requires_resolution: null
+
+  - key: contrastive_encoder
+    name: Contrastive pretraining
+    version: 1.0.0
+    architecture: SimCLR / NT-Xent
+    task: embedding
+    serves: []
+    role: Initialises the unified model's backbone; not served on its own.
+    checkpoint: contrastive_encoder_unified_unified.pt
+    metrics: null
+    dataset: manifest_unified_pretrain
+    trained_by: python -m src.training.pretrain_contrastive --dataset unified
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    requires_resolution: null
+
+  - key: quality_gate
+    name: Quality distribution gate
+    version: 1.0.0
+    architecture: kNN cosine distance to the training feature bank
+    task: distribution_gate
+    serves: [distribution_gate]
+    role: >-
+      Marks grades on imagery unlike the training data as unverified instead of
+      reporting them as defects.
+    checkpoint: quality_reference.npz
+    metrics: quality_gate_comparison
+    dataset: manifest_dataset_4_quality
+    trained_by: python -m src.analysis.build_quality_reference
+    input:
+      kind: embedding
+      dim: 1280
+    requires_resolution: null
+
+  - key: variety_a_full
+    name: Variety model A (ablation)
+    version: 1.0.0
+    architecture: EfficientNet-B0 + cognitive attention, 3 classes
+    task: variety
+    serves: []
+    role: >-
+      Superseded by the unified model. Kept reachable so the
+      contrastive/attention ablation stays reproducible.
+    checkpoint: variety_a_full_best.pt
+    metrics: variety_a_full
+    dataset: manifest_dataset_a
+    trained_by: python -m src.training.train_variety --dataset a --experiment full
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    requires_resolution: null
+
+  - key: variety_b_full_grouped
+    name: Variety model B (ablation)
+    version: 1.0.0
+    architecture: EfficientNet-B0 + cognitive attention, 3 classes
+    task: variety
+    serves: []
+    role: >-
+      Superseded by the unified model. Group-aware splits; kept for the same
+      ablation.
+    checkpoint: variety_b_full_grouped_best.pt
+    metrics: variety_b_full_grouped
+    dataset: manifest_dataset_b_grouped
+    trained_by: python -m src.training.train_variety --dataset b_grouped --experiment full
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    requires_resolution: null
+
+  - key: synthetic_defect_classifier
+    name: Synthetic defect classifier
+    version: 1.0.0
+    architecture: EfficientNet-B0 + cognitive attention, 4 classes
+    task: defect_pattern
+    serves: []
+    label_provenance: synthetic
+    role: >-
+      Trained on defects this project painted. Demonstration only, disabled in
+      the serving path, never a real-world result.
+    checkpoint: synthetic_defect_classifier_best.pt
+    metrics: synthetic_defect
+    dataset: manifest_synthetic_defects
+    trained_by: python -m src.training.train_synthetic_defect
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    requires_resolution: null
+
+  - key: defect_segmenter_synthetic
+    name: Defect segmenter (synthetic)
+    version: 1.0.0
+    architecture: EfficientNet-B0 encoder + U-Net decoder
+    task: defect_segmentation
+    serves: []
+    label_provenance: synthetic
+    role: >-
+      Trained on painted defects. Establishes the resolution floor only; it is
+      not evidence about real defects and is not served.
+    checkpoint: defect_segmenter_synthetic_best.pt
+    metrics: defect_segmenter_synthetic
+    dataset: manifest_segmentation_synthetic
+    trained_by: >-
+      python -m src.segmentation.train_seg --manifest
+      data_processed/manifest_segmentation_synthetic.csv --out-name
+      defect_segmenter_synthetic
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    # Measured, not guessed: outputs/metrics/segmentation_resolution_floor.json.
+    # Below 24px of kernel a mask cannot be produced honestly, so Phase 8 refuses
+    # rather than returning a low-confidence one.
+    requires_resolution:
+      min_kernel_px: 24
+      source: outputs/metrics/segmentation_resolution_floor.json

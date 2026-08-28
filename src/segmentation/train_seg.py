@@ -49,6 +49,7 @@ from src.segmentation.area_stability import area_tier
 from src.segmentation.build_synthetic_manifest import CHANNELS
 from src.segmentation.dataset import SegmentationDataset
 from src.segmentation.model import DefectSegmenter
+from src.registry.model_registry import checkpoint_sha256
 from src.utils.config import load_config, get_device
 from src.utils.logging_utils import get_logger
 from src.utils.seed import set_seed
@@ -478,6 +479,7 @@ def main():
         "test_metrics": test_metrics,
         "test_coverage_error_pp": cov,
         "min_region_px_for_false_alarm": MIN_REGION_PX,
+        "checkpoint_sha256": checkpoint_sha256(ckpt_path),
         "history": history,
     }
     os.makedirs(cfg["paths"]["metrics"], exist_ok=True)
