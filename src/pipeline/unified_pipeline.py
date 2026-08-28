@@ -15,11 +15,13 @@ clear API error rather than a crash (Phase 14/29 requirement).
 from __future__ import annotations
 
 import os
+import statistics
 import uuid
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.pipeline import resolution_gate
 from src.registry import TaskUnavailableError, get_registry
 from src.similarity.embedding_index import IndexEncoderMismatch
 from src.utils.config import load_config, get_device
@@ -59,6 +61,7 @@ class AnalysisPipeline:
         self._faiss_indices: dict[str, object] = {}
         self._registry = None
         self._eval_transform = None
+        self._segmenters = {}
 
     @property
     def device(self):
@@ -73,6 +76,22 @@ class AnalysisPipeline:
             self._registry = get_registry()
         return self._registry
 
+    def _record_for(self, task: str):
+        """The registry record that serves `task`, or a refusal.
+
+        The refusal is the point. A task no model is allowed to serve arrives
+        here as TaskUnavailableError and leaves as ModelNotAvailableError, which
+        the backend already turns into a clear API error rather than a crash.
+        That is a CAPABILITY refusal, and it is not the same fact as the
+        resolution refusal in resolution_gate: one says the platform cannot
+        answer this question at all, the other says it cannot answer it about
+        this particular image. They are reported separately everywhere.
+        """
+        try:
+            return self.registry.resolve(task)
+        except TaskUnavailableError as e:
+            raise ModelNotAvailableError(str(e)) from e
+
     def _checkpoint_for(self, task: str) -> str:
         """The checkpoint that serves `task`, resolved through the registry.
 
@@ -85,10 +104,7 @@ class AnalysisPipeline:
         TaskUnavailableError and leaves as ModelNotAvailableError, which the
         backend already turns into a clear API error rather than a crash.
         """
-        try:
-            return self.registry.resolve(task).checkpoint
-        except TaskUnavailableError as e:
-            raise ModelNotAvailableError(str(e)) from e
+        return self._record_for(task).checkpoint
 
     # ---------- lazy loaders ----------
     def _get_eval_transform(self):
@@ -422,6 +438,171 @@ class AnalysisPipeline:
                            "not verified real-world plant pathology data. See docs/06_SYNTHETIC_DEFECT_POLICY.md.",
         }
 
+    # ---------- segmentation, resolution-gated ----------
+    def _get_segmenter(self, key: str):
+        """Load a segmentation checkpoint by key. Cached per key, like every other
+        model here. Channel names, input size and the per-channel thresholds tuned
+        on VAL all come out of the checkpoint -- none of them are assumed, because
+        a segmenter retrained with a different channel set would otherwise be read
+        with the previous run's meanings."""
+        if key not in self._segmenters:
+            import torch
+
+            from src.segmentation.model import DefectSegmenter
+
+            record = self.registry.get(key)
+            if not record.present:
+                raise ModelNotAvailableError(
+                    f"Segmentation model not found at {record.checkpoint}. "
+                    f"Train it with: {record.trained_by}"
+                )
+            state = torch.load(record.checkpoint, map_location=self.device, weights_only=False)
+            model = DefectSegmenter(
+                channel_names=state["channel_names"],
+                backbone_name=state["backbone"],
+                pretrained=False,
+                use_attention=state["use_attention"],
+            ).to(self.device)
+            model.load_state_dict(state["model_state"])
+            model.eval()
+            self._segmenters[key] = (model, state)
+        return self._segmenters[key]
+
+    def segment_defects(self, crop_image, bbox=None, model_key: str | None = None) -> dict:
+        """Pixel masks for one kernel -- or a documented refusal, never a guess.
+
+        Two gates stand in front of the model, in this order:
+
+          1. CAPABILITY. Without `model_key` the model is resolved by task, so a
+             task the registry refuses to serve stops here. Passing `model_key`
+             is the explicit opt-in used for ablation and tests; the result then
+             carries `is_synthetic_model` and the checkpoint's own label note, so
+             a synthetic-label mask can never be mistaken for a real one.
+          2. RESOLUTION. Below the measured floor no mask is produced at all --
+             not a low-confidence one, not a smaller one. The floor is an
+             information-loss ceiling (see resolution_gate), so a mask under it
+             would not be a worse measurement, it would be an unmeasured one.
+
+        `masks` holds numpy uint8 planes at the CROP's own pixel size, keyed by
+        channel name. They are arrays, not JSON: whatever serialises this response
+        must summarise or encode them rather than pass them through.
+        """
+        if model_key is None:
+            record = self._record_for("defect_segmentation")
+        else:
+            record = self.registry.get(model_key)
+
+        kernel_px = (
+            resolution_gate.kernel_px_from_bbox(bbox)
+            if bbox is not None
+            else resolution_gate.kernel_px_from_size(*crop_image.size)
+        )
+        verdict = resolution_gate.check(record, kernel_px, task="defect_segmentation")
+        if not verdict.sufficient:
+            return {
+                "available": False,
+                "reason": "insufficient_resolution",
+                "message": verdict.message,
+                "model": record.key,
+                "resolution": verdict.as_dict(),
+            }
+
+        import cv2
+        import torch
+
+        from src.segmentation.dataset import IMAGENET_MEAN, IMAGENET_STD
+
+        model, state = self._get_segmenter(record.key)
+        size = int(state["image_size"])
+        channels = list(state["channel_names"])
+        # Thresholds were tuned on VAL per channel; 0.5 is only a fallback for a
+        # checkpoint saved before that sweep existed.
+        # float() rather than the stored numpy scalars: this dict travels out to
+        # callers that serialise it, and np.float64 is not JSON.
+        thresholds = {k: float(v) for k, v in (state.get("thresholds") or {}).items()}
+
+        source = np.array(crop_image.convert("RGB"))
+        h, w = source.shape[:2]
+        resized = cv2.resize(source, (size, size), interpolation=cv2.INTER_AREA)
+        x = (resized.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
+        x = torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))
+        x = x.unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            probs = torch.sigmoid(model(x))[0].cpu().numpy()
+
+        masks = {}
+        for ci, channel in enumerate(channels):
+            plane = (probs[ci] >= float(thresholds.get(channel, 0.5))).astype(np.uint8)
+            # Back to the crop's own pixels so the mask is measurable against the
+            # image it was cut from; NEAREST because a resized mask must stay binary.
+            masks[channel] = cv2.resize(plane, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        return {
+            "available": True,
+            "reason": None,
+            "message": None,
+            "model": record.key,
+            "is_synthetic_model": record.label_provenance == "synthetic",
+            "label_note": record.note,
+            "channels": channels,
+            "thresholds": thresholds,
+            "resolution": verdict.as_dict(),
+            "masks": masks,
+        }
+
+    def segmentation_status(self, kernel_px_values) -> dict:
+        """What this image allows to be said about defect segmentation.
+
+        Reported even when nothing ran, and especially then: two independent
+        things can stop segmentation and a reader needs to know which. "No model
+        is allowed to serve this task" is not fixable with a better photograph;
+        "your kernels are 12 px across" is. Collapsing them into one "unavailable"
+        would send people out to buy a camera for a capability that does not exist.
+
+        The numbers here are measurements of the submitted image, not claims about
+        a mask -- no mask is produced anywhere in this method.
+        """
+        floor = resolution_gate.declared_floor(self.registry, "defect_segmentation")
+        minimum = floor["min_kernel_px"] if floor else None
+        measured = sorted(int(k) for k in kernel_px_values)
+        below = [k for k in measured if minimum is not None and k < minimum]
+
+        resolution = {
+            "min_kernel_px": minimum,
+            "source": floor["source"] if floor else None,
+            "seeds_measured": len(measured),
+            "seeds_below_floor": len(below),
+            "kernel_px_median": int(statistics.median(measured)) if measured else None,
+            "kernel_px_min": measured[0] if measured else None,
+            "kernel_px_max": measured[-1] if measured else None,
+        }
+
+        try:
+            record = self._record_for("defect_segmentation")
+        except ModelNotAvailableError as e:
+            return {
+                "status": "unavailable",
+                "reason": "no_served_model",
+                "message": str(e),
+                "model": None,
+                "resolution": resolution,
+            }
+
+        if measured and len(below) == len(measured):
+            status, reason = "unavailable", "insufficient_resolution"
+        elif below:
+            status, reason = "partial", "insufficient_resolution"
+        else:
+            status, reason = "available", None
+
+        return {
+            "status": status,
+            "reason": reason,
+            "message": None if reason is None else resolution_gate.SEGMENTATION_UNAVAILABLE,
+            "model": record.key,
+            "resolution": resolution,
+        }
+
     def embed_and_search(self, crop_image, dataset: str, top_k: int = 5):
         """Nearest gallery images in the encoder's feature space.
 
@@ -518,6 +699,7 @@ class AnalysisPipeline:
 
         if len(detections) == 0:
             result["warnings"].append("No seeds detected above the confidence threshold.")
+            result["segmentation"] = self.segmentation_status([])
             return result
 
         for i, det in enumerate(detections):
@@ -526,6 +708,11 @@ class AnalysisPipeline:
                 "seed_index": i,
                 "bbox": det["bbox"],
                 "detection_confidence": det["confidence"],
+                # Measured, not requested: how many pixels across this kernel
+                # actually is, by the same short-side rule the resolution floor
+                # was measured with. Carried on every seed because it decides
+                # per seed which pixel-level answers are available for it.
+                "kernel_px": resolution_gate.kernel_px_from_bbox(det["bbox"]),
             }
             if variety_dataset == "unified":
                 try:
@@ -564,6 +751,14 @@ class AnalysisPipeline:
                     result["warnings"].append(f"Similarity unavailable: {e}")
 
             result["seeds"].append(seed_entry)
+
+        # Stated whether or not anything pixel-level ran, and separating the two
+        # reasons it might not have: no model is allowed to serve the task, or the
+        # kernels in this image are below the measured floor. No mask is produced
+        # here in either case.
+        result["segmentation"] = self.segmentation_status(
+            [s["kernel_px"] for s in result["seeds"]]
+        )
 
         result["warnings"] = list(dict.fromkeys(result["warnings"]))  # dedupe, preserve order
         return result

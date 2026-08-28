@@ -9,6 +9,7 @@ import {
   Images,
   Sparkles,
   RotateCcw,
+  Ruler,
 } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import {
@@ -47,6 +48,73 @@ function simLabels(s) {
     primaryMissing: !variety,
     quality: s.quality_label ? pretty(s.quality_label) : null,
   };
+}
+
+// Pixel-level analysis is gated on a measured floor, and this panel exists to say so
+// out loud. Two different things can withhold a defect mask and the operator needs to
+// be told which: "no model is allowed to serve this task" cannot be fixed with a
+// better photograph, "these kernels are 12 px across" can. Nothing here renders a
+// mask or a coverage number -- an unavailable state, shown honestly, is the feature.
+function SegmentationPanel({ segmentation }) {
+  if (!segmentation) return null;
+  const { status, reason, message, model, resolution: res } = segmentation;
+  const tone = status === "available" ? "ok" : status === "partial" ? "warn" : "neutral";
+  const label =
+    status === "available"
+      ? "Resolution sufficient"
+      : status === "partial"
+        ? "Sufficient for some seeds"
+        : "Unavailable";
+
+  return (
+    <GlassCard className="an__seg">
+      <div className="an__rowhead">
+        <span className="an__eyebrow">
+          <Ruler size={13} /> Pixel-level defect analysis
+        </span>
+        <Badge tone={tone}>{label}</Badge>
+      </div>
+
+      {reason === "no_served_model" ? (
+        <p className="an__disclaimer">
+          No verified model is registered to serve pixel-level defect segmentation, so
+          no mask, no defect area and no coverage percentage are produced. This is a
+          missing capability, not an image problem — a higher-resolution photograph
+          would not change it.
+        </p>
+      ) : (
+        message && <p className="an__disclaimer">{message}</p>
+      )}
+
+      {res && (
+        <dl className="an__segstats mono">
+          <div>
+            <dt>kernel size</dt>
+            <dd>
+              {res.kernel_px_median ?? "—"} px median
+              {res.kernel_px_min != null ? ` (${res.kernel_px_min}–${res.kernel_px_max})` : ""}
+            </dd>
+          </div>
+          <div>
+            <dt>measured floor</dt>
+            <dd>{res.min_kernel_px != null ? `${res.min_kernel_px} px` : "—"}</dd>
+          </div>
+          <div>
+            <dt>seeds below floor</dt>
+            <dd>
+              {res.seeds_below_floor} / {res.seeds_measured}
+            </dd>
+          </div>
+        </dl>
+      )}
+
+      <p className="an__model faint mono">
+        kernel size = short side of the detection box · floor measured in{" "}
+        {res?.source || "—"}
+        {model ? ` · ${model}` : ""}
+      </p>
+    </GlassCard>
+  );
 }
 
 export default function Analyze() {
@@ -143,6 +211,10 @@ export default function Analyze() {
 
   const seeds = result?.seeds || [];
   const active = selected != null ? seeds[selected] : null;
+  // The floor a seed is judged against, read from the response rather than written
+  // down here: it is a measurement, and duplicating it in the UI would let the two
+  // drift apart silently.
+  const segFloor = result?.segmentation?.resolution?.min_kernel_px ?? null;
 
   return (
     <Page className="an">
@@ -272,6 +344,8 @@ export default function Analyze() {
                 )}
               </div>
 
+              <SegmentationPanel segmentation={result.segmentation} />
+
               <div className="an__grid">
                 {/* image + boxes */}
                 <GlassCard className="an__viewer">
@@ -359,6 +433,16 @@ export default function Analyze() {
                           <p className="muted">Quality model unavailable for this analysis.</p>
                         )}
                       </GlassCard>
+
+                      {active.kernel_px != null && (
+                        <p className="an__segseed faint mono">
+                          this seed measures {active.kernel_px} px across
+                          {segFloor != null &&
+                            (active.kernel_px >= segFloor
+                              ? ` — at or above the ${segFloor} px pixel-level floor`
+                              : ` — below the ${segFloor} px pixel-level floor, so no mask is produced for it`)}
+                        </p>
+                      )}
                     </>
                   ) : (
                     <GlassCard>

@@ -379,3 +379,35 @@
   text-transform: none;
   opacity: 0.65;
 }
+
+/* Phase 8 — the resolution gate's own panel. Deliberately plain: it reports a
+   measurement and an unavailable state, and dressing that up would be the wrong
+   signal. */
+.an__seg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.an__segstats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--sp-3);
+  margin: 0;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--glass-border);
+}
+.an__segstats dt {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-faint);
+}
+.an__segstats dd {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink);
+}
+.an__segseed {
+  margin: 0;
+  font-size: var(--text-xs);
+}
