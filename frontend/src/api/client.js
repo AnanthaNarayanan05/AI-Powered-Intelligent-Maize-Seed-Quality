@@ -59,10 +59,16 @@ export const api = {
     return fetch(`${BASE_URL}/api/similarity`, { method: "POST", body: form }).then(handle);
   },
 
-  gradcam: async (file, varietyDataset = "a") => {
+  // Returns { url, model, head, targetLayer, predictedClass, region, note } rather
+  // than a bare URL: the caller has to be able to say WHICH prediction the heatmap
+  // explains, and the backend is the only thing that knows. `bbox` is the selected
+  // seed's box in original-image pixels, exactly as /api/analyze returned it.
+  gradcam: async (file, varietyDataset = "unified", { head = "variety", bbox = null } = {}) => {
     const form = new FormData();
     form.append("file", file);
     form.append("variety_dataset", varietyDataset);
+    form.append("head", head);
+    if (bbox) form.append("bbox", bbox.join(","));
     const res = await fetch(`${BASE_URL}/api/explain/gradcam`, { method: "POST", body: form });
     if (!res.ok) {
       let detail = `Request failed (${res.status})`;
@@ -74,7 +80,15 @@ export const api = {
       }
       throw new Error(detail);
     }
-    return URL.createObjectURL(await res.blob());
+    return {
+      url: URL.createObjectURL(await res.blob()),
+      model: res.headers.get("X-Gradcam-Model"),
+      head: res.headers.get("X-Gradcam-Head"),
+      targetLayer: res.headers.get("X-Gradcam-Target-Layer"),
+      predictedClass: res.headers.get("X-Gradcam-Predicted-Class"),
+      region: res.headers.get("X-Gradcam-Region"),
+      note: res.headers.get("X-Explainability-Note"),
+    };
   },
 
   history: (limit = 20, offset = 0) =>

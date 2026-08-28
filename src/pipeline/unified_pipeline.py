@@ -379,17 +379,66 @@ class AnalysisPipeline:
         index = self._get_faiss_index(dataset)
         return index.search(embedding, top_k)
 
-    def generate_gradcam(self, crop_image, dataset: str, experiment: str = "full"):
-        import torch
-        from src.explainability.gradcam import GradCAM
+    GRADCAM_HEADS = ("variety", "quality")
 
-        model, _classes = self._get_variety_model(dataset, experiment)
-        tf = self._get_eval_transform()
-        tensor = tf(crop_image).unsqueeze(0).to(self.device)
-        tensor.requires_grad_(False)
-        cam_engine = GradCAM(model)
-        cam, class_idx = cam_engine.generate(tensor)
-        return cam, class_idx
+    def generate_gradcam(
+        self,
+        crop_image,
+        dataset: str = "unified",
+        experiment: str = "full",
+        head: str = "variety",
+        out_size: tuple[int, int] | None = None,
+    ):
+        """Grad-CAM for the model that actually produced the served prediction.
+
+        Returns (cam, meta). `dataset` defaults to "unified" for the same reason
+        analyze_image does: the unified model is what the platform serves, and a
+        heatmap taken from variety_a_full_best.pt would be explaining a *different*
+        model's decision than the one displayed beside it. "a"/"b" stay reachable so
+        the ablation figures in docs/09 remain reproducible.
+
+        The quality head is only available on the unified model — the per-dataset
+        checkpoints have no quality head to differentiate, so asking for one is an
+        error rather than a silent fall back to variety.
+        """
+        from src.explainability.gradcam import GradCAM, target_layer_name
+
+        if head not in self.GRADCAM_HEADS:
+            raise ValueError(f"head must be one of {self.GRADCAM_HEADS}, got {head!r}")
+
+        if dataset == "unified":
+            model, classes, quality_classes = self._get_unified_model()
+            classes = classes if head == "variety" else quality_classes
+            model_name = "unified_seed_model" if head == "variety" else "unified_seed_model_quality"
+            experiment_used = None
+        else:
+            if head != "variety":
+                raise ValueError(
+                    f"the '{dataset}' variety checkpoint has only a variety head; "
+                    f"head={head!r} is not available on it. Use dataset='unified'."
+                )
+            experiment_used = self._resolve_experiment(dataset, experiment)
+            model, classes = self._get_variety_model(dataset, experiment_used)
+            model_name = f"variety_{dataset}_{experiment_used}"
+
+        tensor = self._get_eval_transform()(crop_image).unsqueeze(0).to(self.device)
+        cam, class_idx = GradCAM(model, head=head).generate(tensor, out_size=out_size)
+
+        meta = {
+            "model": model_name,
+            "head": head,
+            "target_layer": target_layer_name(model),
+            "predicted_class": classes[class_idx],
+            "class_index": class_idx,
+            "experiment": experiment_used,
+            "is_segmentation_mask": False,
+            "note": (
+                "Grad-CAM attention heatmap over the post-attention feature map. It "
+                "shows which regions influenced this prediction. It is NOT a "
+                "segmentation mask and NOT a defect area measurement."
+            ),
+        }
+        return cam, meta
 
     # ---------- orchestration ----------
     def analyze_image(self, image_path: str, variety_dataset: str = "unified", run_similarity: bool = True, run_synthetic_defect: bool = False, top_k: int = 5) -> dict:

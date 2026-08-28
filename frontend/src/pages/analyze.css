@@ -242,6 +242,18 @@
   max-height: 420px;
   display: block;
 }
+/* Provenance caption under the heatmap: which model, head, layer and region the
+   overlay actually explains, plus the "not a segmentation mask" note. */
+.an__explaincap {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--ink-muted);
+  text-align: center;
+  border-top: 1px solid var(--glass-border);
+  width: 100%;
+}
 
 /* ---------- similarity ---------- */
 .simstrip {

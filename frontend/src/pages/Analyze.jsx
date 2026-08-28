@@ -44,7 +44,11 @@ export default function Analyze() {
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
 
-  const [gradcam, setGradcam] = useState({ state: "idle", url: null, error: null });
+  // `meta` carries the backend's account of what the heatmap actually explains —
+  // which model, which head, which layer, which region. It is displayed rather than
+  // assumed so a figure can never be captioned with a model that did not produce it.
+  const [gradcam, setGradcam] = useState({ state: "idle", url: null, error: null, meta: null });
+  const [gradcamHead, setGradcamHead] = useState("variety");
   const [explainTab, setExplainTab] = useState("original");
   const [aiText, setAiText] = useState(null);
   const [aiState, setAiState] = useState("idle");
@@ -55,13 +59,24 @@ export default function Analyze() {
   useEffect(() => () => previewUrl && URL.revokeObjectURL(previewUrl), [previewUrl]);
   useEffect(() => () => gradcam.url && URL.revokeObjectURL(gradcam.url), [gradcam.url]);
 
+  // A heatmap belongs to ONE seed. When the selection moves, the old overlay stops
+  // being an explanation of what is displayed beside it, so it is dropped here — in
+  // the event that changes the selection — rather than in an effect reacting to it.
+  // The revoke effect above frees the discarded object URL.
+  const selectSeed = (index) => {
+    setSelected(index);
+    setGradcam({ state: "idle", url: null, error: null, meta: null });
+    setExplainTab("original");
+  };
+
   const reset = () => {
     setFiles([]);
     setStatus("idle");
     setResult(null);
     setError(null);
     setSelected(null);
-    setGradcam({ state: "idle", url: null, error: null });
+    setGradcam({ state: "idle", url: null, error: null, meta: null });
+    setGradcamHead("variety");
     setExplainTab("original");
     setAiText(null);
     setAiState("idle");
@@ -72,7 +87,7 @@ export default function Analyze() {
     setStatus("running");
     setError(null);
     setResult(null);
-    setSelected(null);
+    selectSeed(null);
     try {
       const data = await api.analyzeImage(file, dataset);
       setResult(data);
@@ -84,15 +99,19 @@ export default function Analyze() {
     }
   };
 
-  const loadGradcam = async () => {
+  const loadGradcam = async (head = gradcamHead) => {
     if (!file || gradcam.state === "loading") return;
-    setGradcam({ state: "loading", url: null, error: null });
+    setGradcam({ state: "loading", url: null, error: null, meta: null });
     try {
-      const url = await api.gradcam(file, dataset);
-      setGradcam({ state: "ready", url, error: null });
+      // Scope the heatmap to the seed whose numbers are on screen. Without a bbox the
+      // CAM covers the whole photograph, including kernels the displayed result says
+      // nothing about.
+      const bbox = selected != null ? result?.seeds?.[selected]?.bbox ?? null : null;
+      const res = await api.gradcam(file, dataset, { head, bbox });
+      setGradcam({ state: "ready", url: res.url, error: null, meta: res });
       setExplainTab("gradcam");
     } catch (e) {
-      setGradcam({ state: "error", url: null, error: e.message });
+      setGradcam({ state: "error", url: null, error: e.message, meta: null });
     }
   };
 
@@ -252,7 +271,7 @@ export default function Analyze() {
                     src={previewUrl}
                     seeds={seeds}
                     selectedIndex={selected}
-                    onSelect={setSelected}
+                    onSelect={selectSeed}
                   />
                 </GlassCard>
 
@@ -344,7 +363,7 @@ export default function Analyze() {
               <GlassCard accent="cyan">
                 <SectionHeader
                   title="Explainability"
-                  subtitle="Model attention visualization — this is not a segmentation mask and does not measure defect area."
+                  subtitle="Model attention visualization for the selected seed — this is not a segmentation mask and does not measure defect area."
                   level={3}
                   right={
                     <div className="an__tabs">
@@ -354,14 +373,27 @@ export default function Analyze() {
                       >
                         Original
                       </button>
-                      <button
-                        className={`an__tab ${explainTab === "gradcam" ? "is-on" : ""}`}
-                        onClick={() =>
-                          gradcam.state === "ready" ? setExplainTab("gradcam") : loadGradcam()
-                        }
-                      >
-                        Grad-CAM
-                      </button>
+                      {/* One button per head: a CAM is only defined with respect to a
+                          single logit, and the variety and quality heads do not attend
+                          to the same pixels. */}
+                      {["variety", "quality"].map((h) => (
+                        <button
+                          key={h}
+                          className={`an__tab ${
+                            explainTab === "gradcam" && gradcamHead === h ? "is-on" : ""
+                          }`}
+                          onClick={() => {
+                            setGradcamHead(h);
+                            if (gradcam.state === "ready" && gradcamHead === h) {
+                              setExplainTab("gradcam");
+                            } else {
+                              loadGradcam(h);
+                            }
+                          }}
+                        >
+                          Grad-CAM · {h}
+                        </button>
+                      ))}
                     </div>
                   }
                 />
@@ -371,15 +403,29 @@ export default function Analyze() {
                     <img src={previewUrl} alt="Original upload" className="an__explainimg" />
                   )}
                   {explainTab === "gradcam" && gradcam.state === "ready" && (
-                    <motion.img
-                      key="gc"
-                      src={gradcam.url}
-                      alt="Grad-CAM model attention heatmap"
-                      className="an__explainimg"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      transition={{ duration: 0.35 }}
-                    />
+                    <>
+                      <motion.img
+                        key="gc"
+                        src={gradcam.url}
+                        alt="Grad-CAM model attention heatmap"
+                        className="an__explainimg"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.35 }}
+                      />
+                      {gradcam.meta && (
+                        <p className="an__explaincap">
+                          <strong>{gradcam.meta.model}</strong> · {gradcam.meta.head} head ·{" "}
+                          {gradcam.meta.targetLayer} feature map · predicted{" "}
+                          <strong>{gradcam.meta.predictedClass}</strong> ·{" "}
+                          {gradcam.meta.region === "seed_bbox"
+                            ? `seed #${selected + 1} only`
+                            : "whole image"}
+                          <br />
+                          {gradcam.meta.note}
+                        </p>
+                      )}
+                    </>
                   )}
                   {gradcam.state === "loading" && <Skeleton height="280px" radius="var(--r-md)" />}
                   {gradcam.state === "error" && (
@@ -389,7 +435,7 @@ export default function Analyze() {
                     <EmptyState
                       icon={Brain}
                       title="Generate attention map"
-                      message="Grad-CAM highlights the image regions that drove the variety prediction."
+                      message="Grad-CAM highlights the image regions that drove the selected head's prediction for this seed."
                       action={
                         <Button variant="ai" size="sm" icon={Brain} onClick={loadGradcam}>
                           Generate

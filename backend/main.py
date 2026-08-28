@@ -29,6 +29,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Response headers a browser is allowed to READ cross-origin. Without this the
+    # Grad-CAM endpoint's "this is not a segmentation mask" note and its which-model
+    # /which-head fields are set but invisible to the frontend, which then has to
+    # guess what the image it is displaying actually explains.
+    expose_headers=[
+        "X-Explainability-Note", "X-Gradcam-Model", "X-Gradcam-Head",
+        "X-Gradcam-Target-Layer", "X-Gradcam-Predicted-Class", "X-Gradcam-Region",
+    ],
 )
 
 app.include_router(analyze.router)

@@ -129,24 +129,104 @@ def test_similarity_search_returns_ranked_neighbours():
     assert distances == sorted(distances), "neighbours must come back nearest-first"
 
 
+needs_unified = pytest.mark.skipif(
+    not _has("unified_seed_model_best.pt"), reason="unified model not trained"
+)
+needs_variety_a = pytest.mark.skipif(
+    not _has("variety_a_full_best.pt"), reason="variety model A not trained"
+)
+
+
 @needs_image
-@pytest.mark.skipif(not _has("variety_a_full_best.pt"), reason="variety model A not trained")
+@needs_unified
 def test_gradcam_heatmap_has_image_shape_and_normalised_range():
+    """The CAM itself: right shape, right range, and honest metadata."""
     from src.pipeline.unified_pipeline import AnalysisPipeline
 
     pipeline = AnalysisPipeline()
     image = pipeline.load_and_validate_image(REAL_IMAGE)
-    cam, class_idx = pipeline.generate_gradcam(image, dataset="a")
+    cam, meta = pipeline.generate_gradcam(image)
 
     assert cam.ndim == 2
     assert cam.min() >= 0.0 and cam.max() <= 1.0
-    assert isinstance(class_idx, int)
+
+    assert meta["model"] == "unified_seed_model"
+    assert meta["head"] == "variety"
+    # The CAM is taken after the cognitive-attention block, which is the part of the
+    # architecture the project actually makes a claim about.
+    assert meta["target_layer"] == "attention"
+    assert isinstance(meta["class_index"], int)
+    assert meta["is_segmentation_mask"] is False
 
 
 @needs_image
-@pytest.mark.skipif(not _has("variety_a_full_best.pt"), reason="variety model A not trained")
+@needs_unified
+def test_gradcam_out_size_upsamples_the_cam_rather_than_shrinking_the_image():
+    """The overlay must come back at the resolution the user uploaded."""
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    pipeline = AnalysisPipeline()
+    image = pipeline.load_and_validate_image(REAL_IMAGE)
+    w, h = image.size
+    cam, _meta = pipeline.generate_gradcam(image, out_size=(h, w))
+    assert cam.shape == (h, w)
+
+
+@needs_image
+@needs_unified
+def test_gradcam_heads_explain_different_pixels():
+    """A CAM is defined per-logit: the two heads must not return the same map.
+
+    If they did, the head selector in the UI would be decorative and the caption
+    "explains the quality prediction" would be false.
+    """
+    import numpy as np
+
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    pipeline = AnalysisPipeline()
+    image = pipeline.load_and_validate_image(REAL_IMAGE)
+    variety_cam, variety_meta = pipeline.generate_gradcam(image, head="variety")
+    quality_cam, quality_meta = pipeline.generate_gradcam(image, head="quality")
+
+    assert quality_meta["head"] == "quality"
+    assert quality_meta["model"] != variety_meta["model"]
+    assert float(np.abs(variety_cam - quality_cam).mean()) > 1e-6
+
+
+@needs_image
+@needs_unified
+def test_gradcam_leaves_no_hooks_and_no_mode_change_on_the_cached_model():
+    """Regression: the old hook-based implementation never released its hooks.
+
+    The pipeline caches model instances, so a leak here degraded ordinary
+    classification for every later request in the process.
+    """
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    pipeline = AnalysisPipeline()
+    image = pipeline.load_and_validate_image(REAL_IMAGE)
+    pipeline.generate_gradcam(image)
+
+    model, _v, _q = pipeline._get_unified_model()
+
+    def hook_count():
+        return sum(
+            len(m._forward_hooks) + len(m._backward_hooks) + len(m._forward_pre_hooks)
+            for m in model.modules()
+        )
+
+    before = hook_count()
+    for _ in range(3):
+        pipeline.generate_gradcam(image)
+    assert hook_count() == before
+    assert model.training is False
+
+
+@needs_image
+@needs_unified
 def test_gradcam_endpoint_returns_png_with_the_not_segmentation_disclaimer():
-    r = client.post("/api/explain/gradcam", files=_upload(REAL_IMAGE), data={"variety_dataset": "a"})
+    r = client.post("/api/explain/gradcam", files=_upload(REAL_IMAGE))
     assert r.status_code == 200, r.text
     assert r.headers["content-type"] == "image/png"
     assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
@@ -155,9 +235,85 @@ def test_gradcam_endpoint_returns_png_with_the_not_segmentation_disclaimer():
     assert "not a segmentation mask" in note
     assert "not a defect area" in note
 
-    # the returned overlay must be a real image, not a blank canvas
+    # which model / head / layer / region produced this figure must be reported, not
+    # left for the caller to assume
+    assert r.headers["X-Gradcam-Model"] == "unified_seed_model"
+    assert r.headers["X-Gradcam-Head"] == "variety"
+    assert r.headers["X-Gradcam-Target-Layer"] == "attention"
+    assert r.headers["X-Gradcam-Region"] == "whole_image"
+    assert r.headers["X-Gradcam-Predicted-Class"]
+
+    # the overlay keeps the uploaded resolution rather than the CAM's coarse grid
+    with open(REAL_IMAGE, "rb") as f:
+        original = Image.open(io.BytesIO(f.read())).size
     overlay = Image.open(io.BytesIO(r.content))
-    assert overlay.size[0] > 0 and overlay.size[1] > 0
+    assert overlay.size == original
+
+
+@needs_image
+@needs_unified
+def test_gradcam_endpoint_explains_the_quality_head_when_asked():
+    r = client.post(
+        "/api/explain/gradcam", files=_upload(REAL_IMAGE), data={"head": "quality"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Gradcam-Head"] == "quality"
+    assert r.headers["X-Gradcam-Model"] == "unified_seed_model_quality"
+
+
+@needs_image
+@needs_variety_a
+def test_gradcam_endpoint_still_serves_the_ablation_checkpoints():
+    """dataset a/b stay reachable so the ablation figures remain reproducible."""
+    r = client.post(
+        "/api/explain/gradcam", files=_upload(REAL_IMAGE), data={"variety_dataset": "a"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Gradcam-Model"].startswith("variety_a_")
+
+    # ...but they have no quality head, and asking for one is a bad request rather
+    # than a silent fall back to variety
+    r = client.post(
+        "/api/explain/gradcam",
+        files=_upload(REAL_IMAGE),
+        data={"variety_dataset": "a", "head": "quality"},
+    )
+    assert r.status_code == 400, r.text
+    assert "quality" in r.json()["detail"]
+
+
+@needs_image
+@needs_unified
+def test_gradcam_endpoint_scopes_the_heatmap_to_a_seed_bbox():
+    """With a bbox the CAM explains ONE kernel, not everything in frame."""
+    with open(REAL_IMAGE, "rb") as f:
+        w, h = Image.open(io.BytesIO(f.read())).size
+
+    box = [w * 0.25, h * 0.25, w * 0.75, h * 0.75]
+    r = client.post(
+        "/api/explain/gradcam",
+        files=_upload(REAL_IMAGE),
+        data={"bbox": ",".join(str(v) for v in box)},
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Gradcam-Region"] == "seed_bbox"
+    # the crop (plus the classifier's context padding) is smaller than the full frame
+    assert Image.open(io.BytesIO(r.content)).size[0] < w
+
+
+@needs_image
+def test_gradcam_endpoint_rejects_bad_requests_instead_of_guessing():
+    cases = [
+        ({"variety_dataset": "zzz"}, "variety_dataset"),
+        ({"head": "zzz"}, "head"),
+        ({"bbox": "1,2,3"}, "bbox"),
+        ({"bbox": "0,0,999999,999999"}, "outside"),
+        ({"bbox": "300,300,10,10"}, "x2>x1"),
+    ]
+    for data, expected in cases:
+        r = client.post("/api/explain/gradcam", files=_upload(REAL_IMAGE), data=data)
+        assert r.status_code == 400, f"{data} -> {r.status_code} {r.text}"
+        assert expected in r.json()["detail"], f"{data} -> {r.json()['detail']}"
 
 
 @needs_image
