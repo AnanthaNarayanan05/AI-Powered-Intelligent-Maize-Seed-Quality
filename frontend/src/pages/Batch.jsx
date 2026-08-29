@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Layers, Images, Sprout, Gauge, Trophy, RotateCcw, Sparkles } from "lucide-react";
+import { Layers, Images, Sprout, Gauge, Trophy, RotateCcw, Sparkles, HelpCircle } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
 import {
@@ -210,6 +210,40 @@ export default function Batch() {
                 <DonutChart data={stats.quality_distribution} />
               </GlassCard>
             )}
+
+          {stats.foreign_object_flags && (
+            <GlassCard>
+              <SectionHeader
+                title="Foreign object review"
+                subtitle="A count of flags and of refusals, not a purity figure. The check measures how unlike known maize each detected object looks; it never identifies one, and an unflagged object is not certified as maize."
+                level={3}
+              />
+              <div className="ba__metrics">
+                <MetricCard
+                  icon={Sprout}
+                  tone="green"
+                  label="Objects scored"
+                  value={stats.foreign_object_flags.objects_scored}
+                />
+                <MetricCard
+                  icon={HelpCircle}
+                  tone="gold"
+                  label="Flagged for review"
+                  value={stats.foreign_object_flags.possible_foreign_objects}
+                  sub="not identified"
+                />
+                {/* Shown even at zero. Objects the check declined to examine are
+                    the ones a reader is most likely to assume were cleared. */}
+                <MetricCard
+                  icon={Gauge}
+                  tone="cyan"
+                  label="Not scored"
+                  value={stats.foreign_object_flags.objects_not_scored ?? 0}
+                  sub="outside the calibrated range"
+                />
+              </div>
+            </GlassCard>
+          )}
 
           <GlassCard accent="cyan">
             <SectionHeader

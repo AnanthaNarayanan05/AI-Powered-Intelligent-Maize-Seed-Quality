@@ -28,6 +28,7 @@ tasks:
   embedding:           Produce the feature vector used for similarity search.
   defect_segmentation: Produce a pixel mask of the defective region.
   defect_pattern:      Name the visible defect pattern on a kernel.
+  foreign_object_flag: Flag an object as unlike known maize. Never names what it is.
 
 models:
   - key: detection
@@ -98,6 +99,39 @@ models:
     metrics: quality_gate_comparison
     dataset: manifest_dataset_4_quality
     trained_by: python -m src.analysis.build_quality_reference
+    input:
+      kind: embedding
+      dim: 1280
+    requires_resolution: null
+
+  - key: maize_identity_gate
+    name: Foreign object flagging gate
+    version: 2.0.0
+    architecture: >-
+      kNN cosine distance to a maize-wide reference of detector crops, minus a
+      quadratic-in-log(crop px) size term fitted on held-out maize. Two limits of
+      applicability -- a 21px resolution floor and a 16-object scene limit --
+      return unavailable rather than a score
+    task: foreign_object_flag
+    serves: [foreign_object_flag]
+    role: >-
+      A RANKED REVIEW AID, not a detector. It scores how unlike known maize a
+      detected object looks and marks the most unlike for a human to inspect. It
+      does not identify the object: no stone, husk, cob-fragment or debris labels
+      exist in this project, so the verdict is flagging and never classification.
+      At the shipped 5% review budget it surfaces 6.5-9.0% of held-out maize and
+      finds 69.8% of the impurities the detector located; the detector itself
+      fires on 74.2% of impurity images, so end-to-end recall is about 51.8% and
+      the absence of a flag is not evidence that an object is maize.
+    checkpoint: maize_reference.npz
+    metrics: maize_gate_comparison
+    dataset: manifest_unified
+    label_provenance: >-
+      No foreign-object labels were used to fit anything. The threshold and the
+      size correction are both fitted on held-out maize alone; GrainSet
+      impurities are used only to measure the resulting catch rate, so that rate
+      is a measurement rather than a fit.
+    trained_by: python -m src.analysis.build_maize_reference
     input:
       kind: embedding
       dim: 1280

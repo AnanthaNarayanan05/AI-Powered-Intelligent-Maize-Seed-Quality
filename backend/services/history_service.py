@@ -170,23 +170,34 @@ def _add_segmentation_rows(db, analysis_id: str, seed: dict) -> None:
 
 
 def _add_assessment_row(db, analysis_id: str, seed: dict) -> None:
-    """Store the distribution gate's numbers for one seed.
+    """Store the distribution gate's and foreign-object gate's numbers for one seed.
 
     These are measured on every kernel already, but until now they travelled inside
-    a classification's probability dict, where nothing could query them. The
-    foreign-object columns stay null: the gate can say a kernel is unlike its
-    training distribution, which is not the same as saying what it is.
+    a classification's probability dict, where nothing could query them.
+
+    ``foreign_object_status`` is only ever ``known_maize``,
+    ``possible_foreign_object`` or ``unavailable`` -- the last for an object the
+    gate declined to score, which a later reader must not fold into either of the
+    other two. It is never a material name: the gate measures
+    distance from known maize, and this project holds no labels that would let it
+    say a flagged object is a stone rather than a husk. The column records
+    flagging, and the basis column records which gate did the flagging so a stored
+    verdict can be traced back to the operating point that produced it.
     """
     quality = seed.get("quality_prediction") or {}
-    if "distribution_distance" not in quality:
+    foreign = seed.get("foreign_object") or {}
+    if "distribution_distance" not in quality and not foreign:
         return
     db.add(SeedAssessment(
         analysis_id=analysis_id,
         seed_index=seed["seed_index"],
-        in_distribution=0 if quality.get("out_of_distribution") else 1,
+        in_distribution=(None if "distribution_distance" not in quality
+                         else (0 if quality.get("out_of_distribution") else 1)),
         distribution_distance=quality.get("distribution_distance"),
         distribution_threshold=quality.get("distribution_threshold"),
         distribution_model=quality.get("model"),
+        foreign_object_status=foreign.get("status"),
+        foreign_object_basis=foreign.get("basis"),
     ))
 
 

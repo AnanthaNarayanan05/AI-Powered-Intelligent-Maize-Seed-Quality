@@ -86,3 +86,53 @@ export const isVarietyRow = (c) =>
   !!c && !c.is_synthetic_model && !QUALITY_MODEL.test(c.model_name || "");
 
 export const isLegacySyntheticRow = (c) => !!c && !!c.is_synthetic_model;
+
+/* ============================================================
+   Foreign-object flagging (Phase 4).
+
+   This is a different kind of statement from seedHealth and is kept separate on
+   purpose. Health asks "is this kernel sound?"; this asks "is this a maize kernel
+   at all?" — and a bad grade for an object that may not be maize is meaningless,
+   so the UI shows this instead of the grade rather than alongside it.
+
+   FLAGGING, NOT CLASSIFICATION. The backend measures distance from known maize.
+   It holds no labels for stones, husk, cob fragments or debris, so nothing here
+   may ever render a material name, and no caller may invent one. Every figure
+   shown comes from the gate artifact via the API; none is written here.
+   ============================================================ */
+
+export function foreignFlag(seed) {
+  const f = seed?.foreign_object;
+  if (!f || f.status !== "possible_foreign_object") return null;
+  return {
+    flagged: true,
+    // Deliberately not a name. "Unidentified" is the whole finding.
+    label: "Possible foreign object",
+    reason:
+      f.caveat ||
+      "Does not resemble the maize kernels the system knows. Not identified.",
+    // Present only when the build that shipped the gate measured it.
+    endToEndRecall: f.end_to_end_recall ?? null,
+  };
+}
+
+/* An object the gate declined to score at all, which is neither flagged nor
+   cleared. It is deliberately not a foreignFlag: drawing it like a flag would
+   accuse an object the system never examined, and hiding it would let a refusal
+   read as a pass. It gets its own quiet state in the panel and no box marking.
+
+   Two things trigger it, both measured rather than chosen: the object is smaller
+   than the smallest crop the score was calibrated on, or its image holds more
+   objects than any scene the gate was calibrated against. */
+export function foreignUnavailable(seed) {
+  const f = seed?.foreign_object;
+  if (!f || f.status !== "unavailable") return null;
+  return {
+    label: "Foreign-object review unavailable",
+    reason: f.caveat || "This object is outside the range the check was measured on.",
+    cropPx: f.crop_px ?? null,
+    floorPx: f.resolution_floor_px ?? null,
+    sceneObjects: f.scene_objects ?? null,
+    sceneLimit: f.scene_limit_objects ?? null,
+  };
+}

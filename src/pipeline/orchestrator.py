@@ -119,18 +119,6 @@ UNBUILT: dict[str, UnbuiltCapability] = {
             "probability would put a scale on a quantity nothing measured."
         ),
     ),
-    "foreign_object": UnbuiltCapability(
-        name="foreign_object",
-        label="Foreign object detection",
-        owner="Phase 4 - foreign object detection",
-        requires_task=None,
-        note=(
-            "The distribution gate already flags kernels that do not resemble the quality "
-            "model's training data, and Phase 4 will build on it -- but it has never been "
-            "evaluated against labelled foreign objects, so reading its score as one today "
-            "would be claiming a detector this project has not tested."
-        ),
-    ),
 }
 
 
@@ -171,6 +159,17 @@ STAGES: dict[str, Stage] = {
         needs=("detect",),
         expensive=True,
         describe="Variety, Good/Bad grade and the distribution gate, in one pass.",
+    ),
+    "foreign": Stage(
+        name="foreign",
+        # Its own stage rather than a fourth task on classify: the flag comes from
+        # the same forward pass, but a missing foreign-object gate must not make
+        # "what variety is this" unanswerable. Separating them lets the registry
+        # refuse exactly one intent.
+        tasks=("foreign_object_flag",),
+        needs=("detect", "classify"),
+        expensive=False,
+        describe="Flag objects that do not resemble known maize. Never names them.",
     ),
     "resolution": Stage(
         name="resolution",
@@ -252,8 +251,8 @@ INTENTS: tuple[Intent, ...] = (
     Intent(
         name="foreign_objects",
         canonical="Check for foreign objects",
-        stages=("detect", "classify"),
-        capability="foreign_object",
+        stages=("detect", "classify", "foreign"),
+        capability=None,
         patterns=(
             r"\bforeign\b",
             r"\bcontaminan",
@@ -586,14 +585,33 @@ class Orchestrator:
     def _run_classify(self, state: RunState, params: tuple) -> dict:
         image = self._image(state)
         out = {}
-        for seed in state.stages["detect"].value:
+        seeds = state.stages["detect"].value
+        for seed in seeds:
             crop = self.pipeline.crop_seed(image, seed["bbox"])
-            variety, quality = self.pipeline.classify_unified(crop)
+            # len(seeds) is the whole scene's object count, which the foreign-object
+            # gate needs to decide whether this image is one it was calibrated on.
+            variety, quality, foreign = self.pipeline.classify_unified_full(
+                crop, scene_objects=len(seeds))
             out[seed["seed_index"]] = {
                 "variety_prediction": variety,
                 "quality_prediction": quality,
+                "foreign_object": foreign,
             }
         return out
+
+    def _run_foreign(self, state: RunState, params: tuple) -> dict:
+        """Reads back what the classify pass already measured.
+
+        No second forward pass and no second model: the flag is a derived
+        measurement over the embedding classify produced. If the gate is not
+        installed the stage never runs, because the registry refuses the task
+        before this is reached.
+        """
+        return {
+            index: value["foreign_object"]
+            for index, value in state.stages["classify"].value.items()
+            if value.get("foreign_object")
+        }
 
     def _run_resolution(self, state: RunState, params: tuple) -> dict:
         seeds = state.stages["detect"].value
@@ -849,28 +867,93 @@ class Orchestrator:
         return answer
 
     def _answer_foreign_objects(self, state: RunState, seeds: list[dict]) -> dict:
-        answer = self._unbuilt_answer("foreign_object")
-        classify = state.stages.get("classify")
-        if classify and classify.usable:
-            flagged = [
-                s["seed_index"]
-                for s in seeds
-                if (s.get("quality_prediction") or {}).get("out_of_distribution")
-            ]
-            answer["related_signal"] = {
-                "signal": "distribution_gate",
-                "objects_flagged_as_unlike_training_data": len(flagged),
-                "seed_indices": flagged,
-                "what_it_means": (
-                    "These kernels sit further from the quality model's training representation "
-                    "than its calibrated threshold allows, so its grade for them is unverified."
-                ),
-                "what_it_does_not_mean": (
-                    "It is not a foreign-object finding. The gate was calibrated on maize imagery "
-                    "and has never been evaluated against labelled non-seed objects, so it cannot "
-                    "say that an object is a stone, husk or debris -- or that it is not maize."
-                ),
+        """FLAGGING, not CLASSIFICATION -- and the answer says so in its own body.
+
+        Every number here is a count of flags or of refusals. None of them is an
+        identification:
+        the gate measures distance from known maize, and this project has no
+        stone/husk/cob/debris labels with which to name what a flagged object is.
+        The recall is stated alongside the count on purpose, because the number a
+        reader will otherwise infer -- that the unflagged objects are maize -- is
+        the one thing this measurement cannot support. It is read out of the gate
+        artifact rather than written here, so a recalibration cannot leave a stale
+        figure behind in this sentence.
+        """
+        stage = state.stages.get("foreign")
+        if stage is None or not stage.usable:
+            return {
+                "capability": "foreign_object_flagging",
+                "available": False,
+                "reason": stage.reason if stage else "not_run",
+                "message": (stage.message if stage else
+                            "The foreign-object gate did not run for this image."),
             }
+
+        verdicts = stage.value
+        flagged = sorted(i for i, v in verdicts.items()
+                         if v["status"] == "possible_foreign_object")
+        # Objects the gate declined to score at all -- too small, or in a scene
+        # denser than anything it was calibrated on. They are counted separately
+        # and never folded into "known maize", which would turn a refusal to
+        # answer into a clean bill of health.
+        unavailable = sorted(i for i, v in verdicts.items()
+                             if v["status"] == "unavailable")
+        scored = [v for v in verdicts.values() if v["status"] != "unavailable"]
+        sample = next(iter(scored), next(iter(verdicts.values()), {}))
+        answer = {
+            "capability": "foreign_object_flagging",
+            "available": True,
+            "is_classification": False,
+            "objects_detected": len(verdicts),
+            "objects_scored": len(scored),
+            "possible_foreign_objects": len(flagged),
+            "known_maize": len(scored) - len(flagged),
+            "not_scored": len(unavailable),
+            "seed_indices": flagged,
+            "not_scored_indices": unavailable,
+            "basis": "maize_identity_gate",
+            "operating_point": {
+                # The review budget is what the threshold was set to, not what it
+                # achieved: it is the fraction of held-out maize the gate surfaces
+                # by construction. The catch rate against it is a measurement.
+                "review_budget": sample.get("review_budget"),
+                "maize_threshold": sample.get("maize_threshold"),
+                "measured_recall": sample.get("measured_recall"),
+                "detection_rate": sample.get("detection_rate"),
+                "end_to_end_recall": sample.get("end_to_end_recall"),
+                "enrichment": sample.get("enrichment"),
+                "resolution_floor_px": sample.get("resolution_floor_px"),
+                "scene_limit_objects": sample.get("scene_limit_objects"),
+            },
+            "what_it_means": (
+                "A flagged object is more unlike known maize than most held-out maize "
+                "kernels are, on a score corrected for crop size and thresholded on "
+                "held-out maize alone. It is a review aid: the flagged slice carries "
+                "foreign objects at roughly "
+                + (f"{sample['enrichment']:.0f}x " if sample.get("enrichment")
+                   else "several times ")
+                + "the rate of the pool it came from, which is worth a grader's "
+                "attention and is not a detection -- at any realistic contamination "
+                "rate most flagged objects are ordinary maize."
+            ),
+            "what_it_does_not_mean": (
+                "It is not an identification. The system holds no labels for stones, husk, "
+                "cob fragments or debris and cannot say what a flagged object is. Nor is an "
+                "unflagged object certified as maize"
+                + (f": end-to-end recall was measured at "
+                   f"{sample['end_to_end_recall']:.0%}, so most foreign objects are "
+                   "missed, and anything the detector never found was never scored at all."
+                   if sample.get("end_to_end_recall") is not None else
+                   ", and this build carries no measured catch rate to quote.")
+            ),
+        }
+        if unavailable:
+            answer["not_scored_reason"] = (
+                "Some objects were not scored at all. The gate declines rather than "
+                "extrapolates: below its measured resolution floor, or in a scene "
+                "holding more objects than any it was calibrated on. An unscored "
+                "object is neither flagged nor cleared."
+            )
         return answer
 
     def _answer_explain(self, state: RunState, seeds: list[dict]) -> dict:

@@ -74,9 +74,9 @@ def test_system_info_is_read_from_disk_not_hard_coded():
         if m["status"] == "missing":
             assert m["metrics"] == [] or m["trained_at"] is None
 
-    # the served stack is exactly the three models the pipeline actually runs
+    # the served stack is exactly the models the pipeline actually runs
     assert {k for k, m in models.items() if m["served"]} == {
-        "detection", "unified_seed_model", "quality_gate"
+        "detection", "unified_seed_model", "quality_gate", "maize_identity_gate"
     }
 
 

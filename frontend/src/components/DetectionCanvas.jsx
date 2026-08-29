@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Eye, EyeOff, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
-import { seedHealth } from "../lib/seedHealth";
+import { seedHealth, foreignFlag } from "../lib/seedHealth";
 import "./detectioncanvas.css";
 
 export default function DetectionCanvas({
@@ -100,11 +100,22 @@ export default function DetectionCanvas({
               if (!box) return null;
               const active = selectedIndex === i;
               const health = seedHealth(seed);
+              // A possible foreign object supersedes the health marker: grading
+              // the soundness of something that may not be a kernel is not a
+              // result, and showing both invites the reader to merge them.
+              const foreign = foreignFlag(seed);
+              const mark = foreign
+                ? { flagged: true, verified: false, reason: foreign.reason }
+                : health;
               return (
                 <motion.button
                   key={seed.seed_index ?? i}
                   className={`dbox ${active ? "is-active" : ""} ${
-                    health.flagged ? (health.verified ? "is-flagged" : "is-unverified") : ""
+                    foreign
+                      ? "is-foreign"
+                      : health.flagged
+                        ? health.verified ? "is-flagged" : "is-unverified"
+                        : ""
                   }`}
                   style={box}
                   initial={{ opacity: 0, scale: 1.14 }}
@@ -115,16 +126,28 @@ export default function DetectionCanvas({
                     ease: [0.22, 1, 0.36, 1],
                   }}
                   onClick={() => onSelect?.(active ? null : i)}
-                  title={health.flagged ? `Seed ${i + 1} — ${health.reason}` : `Seed ${i + 1}`}
+                  title={
+                    foreign
+                      ? `Object ${i + 1} — ${foreign.label}. ${foreign.reason}`
+                      : mark.flagged
+                        ? `Seed ${i + 1} — ${mark.reason}`
+                        : `Seed ${i + 1}`
+                  }
                   aria-label={
-                    health.flagged
-                      ? `Seed ${i + 1}, flagged: ${health.reason}`
-                      : `Seed ${i + 1}`
+                    foreign
+                      ? `Object ${i + 1}, ${foreign.label}, not identified`
+                      : mark.flagged
+                        ? `Seed ${i + 1}, flagged: ${mark.reason}`
+                        : `Seed ${i + 1}`
                   }
                 >
-                  {health.flagged && (
+                  {mark.flagged && (
                     <span
-                      className={`dbox__flag ${health.verified ? "" : "dbox__flag--unverified"}`}
+                      className={`dbox__flag ${
+                        foreign
+                          ? "dbox__flag--foreign"
+                          : mark.verified ? "" : "dbox__flag--unverified"
+                      }`}
                       aria-hidden="true"
                     />
                   )}

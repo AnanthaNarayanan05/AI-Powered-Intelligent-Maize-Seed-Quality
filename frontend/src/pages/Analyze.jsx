@@ -10,9 +10,11 @@ import {
   Sparkles,
   RotateCcw,
   Ruler,
+  HelpCircle,
 } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
+import { foreignFlag, foreignUnavailable } from "../lib/seedHealth";
 import {
   Badge,
   Button,
@@ -434,6 +436,67 @@ export default function Analyze() {
                           <p className="muted">Quality model unavailable for this analysis.</p>
                         )}
                       </GlassCard>
+
+                      {foreignFlag(active) && (
+                        <GlassCard accent="warn" className="an__resultcard">
+                          <div className="an__rowhead">
+                            <span className="an__eyebrow">
+                              <HelpCircle size={13} /> Foreign object check
+                            </span>
+                            <Badge tone="warn">flagged, not identified</Badge>
+                          </div>
+                          <h3 className="an__predict an__predict--warn">
+                            Possible foreign object
+                          </h3>
+                          {/* No name, no confidence bar. A percentage next to an
+                              unidentified object reads as certainty about what it
+                              is, and the gate measures only that it is unlike
+                              known maize. */}
+                          <p className="an__disclaimer">
+                            {foreignFlag(active).reason}
+                          </p>
+                          {/* The compared quantities, not the raw distance: the
+                              score is the distance with its crop-size trend
+                              removed, and only the score ever meets a threshold. */}
+                          <p className="an__model faint mono">
+                            gate: {active.foreign_object?.basis || "—"} · score{" "}
+                            {active.foreign_object?.maize_score} vs threshold{" "}
+                            {active.foreign_object?.maize_threshold} · more unlike
+                            maize than{" "}
+                            {active.foreign_object?.atypicality != null
+                              ? `${Math.round(active.foreign_object.atypicality * 100)}%`
+                              : "—"}{" "}
+                            of held-out kernels
+                          </p>
+                        </GlassCard>
+                      )}
+
+                      {/* Neither flagged nor cleared. Shown plainly rather than
+                          omitted: an object the check never examined must not
+                          leave the panel looking like one that passed. */}
+                      {foreignUnavailable(active) && (
+                        <GlassCard className="an__resultcard">
+                          <div className="an__rowhead">
+                            <span className="an__eyebrow">
+                              <HelpCircle size={13} /> Foreign object check
+                            </span>
+                            <Badge>not run</Badge>
+                          </div>
+                          <h3 className="an__predict muted">
+                            {foreignUnavailable(active).label}
+                          </h3>
+                          <p className="an__disclaimer">
+                            {foreignUnavailable(active).reason} This object is
+                            neither flagged nor cleared.
+                          </p>
+                          <p className="an__model faint mono">
+                            {foreignUnavailable(active).cropPx != null &&
+                              `object ${foreignUnavailable(active).cropPx} px · floor ${foreignUnavailable(active).floorPx} px`}
+                            {foreignUnavailable(active).sceneObjects != null &&
+                              ` · scene ${foreignUnavailable(active).sceneObjects} objects · calibrated to ${foreignUnavailable(active).sceneLimit}`}
+                          </p>
+                        </GlassCard>
+                      )}
 
                       {active.kernel_px != null && (
                         <p className="an__segseed faint mono">

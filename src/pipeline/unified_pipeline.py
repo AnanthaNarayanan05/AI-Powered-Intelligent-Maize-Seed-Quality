@@ -57,6 +57,7 @@ class AnalysisPipeline:
         self._variety_models: dict[str, object] = {}
         self._unified_model = None
         self._quality_reference = None
+        self._maize_reference = None
         self._synthetic_model = None
         self._faiss_indices: dict[str, object] = {}
         self._registry = None
@@ -226,8 +227,220 @@ class AnalysisPipeline:
                 self._quality_reference = (z["reference"], float(z["threshold"]), int(z["k"]))
         return self._quality_reference or None
 
+    def _get_maize_reference(self):
+        """The Phase 4 foreign-object review aid: a maize-wide reference, the
+        held-out calibration a raw distance is restated against, and the review
+        threshold. Returns None when the reference was never built, in which case
+        seeds simply carry no verdict -- the absence of a flag is not a claim that
+        nothing is foreign."""
+        if self._maize_reference is None:
+            record = self.registry.get("maize_identity_gate")
+            if not record.available:
+                self._maize_reference = False
+            else:
+                z = np.load(record.checkpoint)
+                # Stored float16 to halve an 89 MB artifact; re-normalised here so
+                # the rounding does not bias the cosine. Measured to change none
+                # of 7,465 decisions.
+                ref = z["reference"].astype(np.float32)
+                ref /= np.linalg.norm(ref, axis=1, keepdims=True) + 1e-8
+                # Every performance figure served with a verdict is read out of
+                # the artifact that was measured, never written here. A rebuild
+                # that moves the numbers moves what the user is told, and one that
+                # cannot supply a figure makes the caveat drop it rather than
+                # quote a stale one.
+                self._maize_reference = {
+                    "reference": ref,
+                    "calibration": z["calibration"].astype(np.float32),
+                    "threshold": float(z["threshold"]),
+                    "review_budget": float(z["review_budget"]),
+                    "k": int(z["k"]),
+                    # Quadratic in log crop short side, fitted on held-out
+                    # calibration crops. A quarter of the raw distance was crop
+                    # resolution rather than maize identity; subtracting this is
+                    # what makes the calibrated budget hold on real uploads.
+                    "size_coef": z["size_coef"].astype(np.float64),
+                    # Below this the correction is extrapolating past the crops it
+                    # was fitted on, so no score is produced at all.
+                    "resolution_floor_px": int(z["resolution_floor_px"]),
+                    # The densest scene the gate was calibrated on. Packed scenes
+                    # fill every crop with fragments of neighbouring kernels, which
+                    # the size correction does not touch and the corpus does not
+                    # cover; past this count the gate declines rather than guesses.
+                    "scene_limit_objects": (int(z["scene_limit_objects"])
+                                            if "scene_limit_objects" in z else None),
+                    "measured_recall": (float(z["measured_recall"])
+                                        if "measured_recall" in z else None),
+                    "detection_rate": (float(z["detection_rate"])
+                                       if "detection_rate" in z else None),
+                    "enrichment": (float(z["enrichment"])
+                                   if "enrichment" in z else None),
+                }
+        return self._maize_reference or None
+
+    def _flag_foreign_object(self, emb, quality_distance=None, crop_px=None,
+                             scene_objects=None):
+        """How unlike known maize this object looks -- and nothing finer.
+
+        The primary output is ``atypicality``: the fraction of held-out maize
+        kernels this object is further from the reference than. A raw cosine
+        distance is meaningless to a reader; a percentile against real maize is
+        not. Above the review threshold the object is also marked for review.
+
+        This is a RANKED REVIEW AID, not a detector, and the distinction is a
+        finding rather than a hedge. At the shipped operating point the score
+        surfaces under a tenth of genuine maize, so at any realistic contamination
+        rate most surfaced objects are ordinary kernels. What it does well is
+        concentrate: the surfaced slice carries foreign objects at roughly nine
+        times the base rate, which is worth a grader's attention and is not a
+        detection.
+
+        ``crop_px`` is the crop's short side and is not optional in spirit. The
+        raw distance falls steadily with crop size -- R2 = 0.243 on size alone --
+        so an uncorrected score partly measures resolution, and did: it marked
+        63.5% of objects on real uploads against a 10% budget, almost all of them
+        small crops. The fitted size term is subtracted before anything is
+        compared to a threshold. Without a size the score cannot be corrected, so
+        no verdict is returned rather than an uncorrected one.
+
+        ``scene_objects`` is how many objects the detector found in the whole
+        image this crop came from, and it is the second limit of applicability.
+        On a densely packed upload -- 300 detections, every object ordinary maize
+        by inspection -- 42% were surfaced against a 5% budget, while calibration
+        crops of the same size behave at 6-8%. Packing, not size, is what differs:
+        the corpus this gate was calibrated on tops out at sixteen objects in an
+        image. Past that the verdict is unavailable.
+
+        It is FLAGGING, NOT CLASSIFICATION. It never says what an object is: this
+        project holds no stone, husk, cob-fragment or debris labels, so no such
+        claim is supportable. ``quality_distance`` is carried through as context
+        only -- an earlier build required it to agree before flagging, and that AND
+        rule was measured in the serving domain to catch strictly less than this
+        gate alone. See src/analysis/build_maize_reference.py for the sweep.
+        """
+        gate = self._get_maize_reference()
+        if not gate:
+            return None
+        k, threshold = gate["k"], gate["threshold"]
+        cal = gate["calibration"]
+        floor = gate["resolution_floor_px"]
+
+        scene_limit = gate.get("scene_limit_objects")
+
+        # Phase 8's principle applied to this gate, twice: a score produced outside
+        # the range it was calibrated on is not a measurement. Say so instead.
+        def unavailable(reason):
+            return {
+                "status": "unavailable",
+                "basis": "maize_identity_gate",
+                "is_classification": False,
+                "is_detector": False,
+                "resolution_floor_px": floor,
+                "scene_limit_objects": scene_limit,
+                "crop_px": int(crop_px) if crop_px is not None else None,
+                "scene_objects": (int(scene_objects)
+                                  if scene_objects is not None else None),
+                "caveat": "Foreign-object review unavailable -- " + reason,
+            }
+
+        if crop_px is None:
+            return unavailable("the object's size was not supplied, and the score "
+                               "cannot be corrected for it.")
+        if crop_px < floor:
+            return unavailable(
+                f"this object is {int(crop_px)}px across and the score is only "
+                f"calibrated down to {floor}px."
+            )
+        if scene_limit is not None and scene_objects is not None                 and scene_objects > scene_limit:
+            return unavailable(
+                f"this image holds {int(scene_objects)} detected objects and the "
+                f"score was calibrated on scenes of at most {scene_limit}. In "
+                "packed scenes each crop is filled with neighbouring kernels, "
+                "which this score has never been measured against."
+            )
+
+        e = emb / (np.linalg.norm(emb) + 1e-8)
+        sims = gate["reference"] @ e
+        distance = float(1.0 - np.partition(sims, -k)[-k:].mean())
+        # The shipped score. ``distance`` is kept for display, but nothing is
+        # compared against a threshold until the size trend comes out of it.
+        log_px = np.log(float(crop_px))
+        a, b, c = gate["size_coef"]
+        score = float(distance - (a + b * log_px + c * log_px * log_px))
+        atypicality = float(np.searchsorted(cal, score, side="right") / len(cal))
+        flagged = bool(score > threshold)
+
+        recall, detection = gate["measured_recall"], gate["detection_rate"]
+        # Catch rate among objects the detector found, times how often it finds
+        # one. The second factor is not a detail: an object YOLO misses is never
+        # scored by any threshold, so the aid's real reach is the product.
+        end_to_end = (round(recall * detection, 4)
+                      if recall is not None and detection is not None else None)
+
+        out = {
+            "status": "possible_foreign_object" if flagged else "known_maize",
+            "basis": "maize_identity_gate",
+            "atypicality": round(atypicality, 4),
+            "maize_score": round(score, 4),
+            "maize_distance": round(distance, 4),
+            "maize_threshold": round(threshold, 4),
+            "crop_px": int(crop_px),
+            "scene_objects": (int(scene_objects)
+                              if scene_objects is not None else None),
+            # The two limits ride on served verdicts as well as refused ones. A
+            # caller summarising a whole image reads the operating point off any
+            # one verdict, and a summary that reported the limits only when
+            # something was refused would describe the gate as boundless
+            # precisely when nothing had tested its boundaries.
+            "resolution_floor_px": floor,
+            "scene_limit_objects": scene_limit,
+            "quality_distance": (round(quality_distance, 4)
+                                 if quality_distance is not None else None),
+            "is_classification": False,
+            "is_detector": False,
+            "measured_recall": recall,
+            "detection_rate": detection,
+            "end_to_end_recall": end_to_end,
+            "enrichment": (round(gate["enrichment"], 2)
+                           if gate["enrichment"] is not None else None),
+            "review_budget": round(gate["review_budget"], 4),
+        }
+        if flagged:
+            out["caveat"] = (
+                "Marked for review: this object is more unlike known maize than "
+                f"{atypicality:.0%} of held-out maize kernels. It is not identified "
+                "-- the system has no data on stones, husk, cob fragments or debris "
+                "and cannot say what this is -- and it is not a detection: most "
+                "objects marked this way are ordinary maize."
+            )
+        else:
+            out["caveat"] = (
+                "Resembles known maize. The absence of a mark is not evidence that "
+                "an object is maize"
+                + (f": review at this setting surfaces about {end_to_end:.0%} of "
+                   "foreign objects end to end."
+                   if end_to_end is not None else
+                   ", and this build carries no measured catch rate to quote.")
+            )
+        return out
+
     def classify_unified(self, crop_image):
         """One forward pass, both predictions. Returns (variety, quality) dicts."""
+        return self.classify_unified_full(crop_image)[:2]
+
+    def classify_unified_full(self, crop_image, scene_objects=None):
+        """As classify_unified, plus the Phase 4 foreign-object verdict.
+
+        Kept separate so the long-standing two-value contract keeps working for
+        every existing caller; the flag rides on the same single forward pass.
+        Returns (variety, quality, foreign_object) where the third is None when
+        the gate is not installed.
+
+        ``scene_objects`` is optional and defaults to None so every existing
+        caller keeps working. Callers that hold the whole image should pass how
+        many objects were detected in it: the foreign-object gate needs it to know
+        whether the scene is one it was calibrated on.
+        """
         import torch
 
         model, v_classes, q_classes = self._get_unified_model()
@@ -260,12 +473,14 @@ class AnalysisPipeline:
         # Softmax confidence does not detect extrapolation -- it runs HIGHER on some
         # out-of-distribution imagery than on real test data. Distance to the
         # training representation does. See src/analysis/build_quality_reference.py.
+        quality_distance = None
         ref = self._get_quality_reference()
         if ref:
             reference, threshold, k = ref
             e = emb / (np.linalg.norm(emb) + 1e-8)
             sims = reference @ e
             dist = float(1.0 - np.partition(sims, -k)[-k:].mean())
+            quality_distance = dist
             quality["distribution_distance"] = round(dist, 4)
             quality["distribution_threshold"] = round(threshold, 4)
             quality["out_of_distribution"] = bool(dist > threshold)
@@ -275,7 +490,17 @@ class AnalysisPipeline:
                     "trained and validated on, so its grade is an extrapolation rather "
                     "than a measurement. Treat it as unverified."
                 )
-        return variety, quality
+
+        # The same embedding, read at a different operating point. The quality gate
+        # asks whether the grade is trustworthy and is deliberately loose; the
+        # foreign-object rule asks a harder question against a threshold calibrated
+        # on held-out maize. Both are honest about different things and neither
+        # substitutes for the other. The crop's short side goes with it because the
+        # score is corrected for crop size before it is thresholded.
+        foreign = self._flag_foreign_object(emb, quality_distance,
+                                            crop_px=min(crop_image.size),
+                                            scene_objects=scene_objects)
+        return variety, quality, foreign
 
     def _get_synthetic_model(self):
         if self._synthetic_model is None:
@@ -716,12 +941,18 @@ class AnalysisPipeline:
             }
             if variety_dataset == "unified":
                 try:
-                    variety, quality = self.classify_unified(crop)
+                    # The scene's object count travels with every crop: a packed
+                    # image is one the foreign-object gate was never calibrated on,
+                    # and it has to be able to say so rather than score anyway.
+                    variety, quality, foreign = self.classify_unified_full(
+                        crop, scene_objects=len(detections))
                     seed_entry["variety_prediction"] = variety
                     seed_entry["quality_prediction"] = quality
+                    seed_entry["foreign_object"] = foreign
                 except ModelNotAvailableError as e:
                     seed_entry["variety_prediction"] = None
                     seed_entry["quality_prediction"] = None
+                    seed_entry["foreign_object"] = None
                     result["warnings"].append(str(e))
             else:
                 try:

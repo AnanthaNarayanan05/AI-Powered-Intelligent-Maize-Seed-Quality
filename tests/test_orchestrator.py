@@ -150,8 +150,12 @@ def test_the_questions_this_project_cannot_answer_are_listed_as_such():
     by_intent = {entry["intent"]: entry for entry in report["intents"]}
     assert by_intent["analyze"]["answerable"] is True
     assert by_intent["find_defects"]["answerable"] is True
+    # Built in Phase 4, and answerable -- as flagging. The intent stays in this
+    # test because what it must never become is a classification: a capability
+    # that answers is a capability that can over-answer.
+    assert by_intent["foreign_objects"]["answerable"] is True
     # Not built yet, and each names the phase that owns it rather than going quiet.
-    for name in ("measure_defect", "severity", "foreign_objects"):
+    for name in ("measure_defect", "severity"):
         assert by_intent[name]["answerable"] is False
         assert by_intent[name]["not_implemented"]["owner"]
     # Built, but nothing is allowed to serve it -- a different problem, and the
@@ -287,16 +291,31 @@ def test_severity_offers_the_binary_grade_only_with_its_limitation_attached(run)
 
 
 @needs_image
-def test_foreign_objects_reports_the_distribution_gate_as_a_signal_not_a_finding(run):
-    """The gate is the nearest thing this project has, and the nearest thing is
-    exactly what gets over-claimed: it was calibrated on maize and has never been
-    evaluated against labelled non-seed objects."""
+def test_foreign_objects_answers_with_flags_and_refusals_and_never_an_identity(run):
+    """Phase 4 turned this from a refusal into an answer, which is the more
+    dangerous of the two states. What the answer may contain is a count of flags,
+    a count of objects the gate declined to score, and no name for anything.
+
+    The three counts are asserted to reconcile because the tempting bug is to let
+    a declined object fall into "known maize" -- which converts a refusal to
+    examine an object into a clean bill of health for it.
+    """
     orchestrator, image = run
     result = orchestrator.run(image_path=image, question="Check for foreign objects")
     answer = result["answer"]
-    assert answer["available"] is False
-    signal = answer["related_signal"]
-    assert signal["what_it_means"] and signal["what_it_does_not_mean"]
+    assert answer["available"] is True
+    assert answer["is_classification"] is False
+    assert answer["capability"] == "foreign_object_flagging"
+    assert (answer["known_maize"] + answer["possible_foreign_objects"]
+            == answer["objects_scored"])
+    assert (answer["objects_scored"] + answer["not_scored"]
+            == answer["objects_detected"])
+    assert answer["what_it_means"] and answer["what_it_does_not_mean"]
+    # The answer must state its own limit. Scanning it for material names would
+    # be the wrong test here -- the disclaimer earns the right to say "stone" by
+    # saying the system cannot recognise one -- so the assertion is positive.
+    # Verdicts themselves are held to the naming rule in test_foreign_object_gate.
+    assert "not an identification" in json.dumps(answer["what_it_does_not_mean"]).lower()
 
 
 @needs_image
