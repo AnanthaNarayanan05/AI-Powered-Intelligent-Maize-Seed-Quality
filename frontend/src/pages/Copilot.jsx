@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Send, Sparkles, MessageSquare, Sprout } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
+import { isQualityRow, isVarietyRow } from "../lib/seedHealth";
+import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
 import {
   Badge,
   Button,
@@ -75,11 +77,8 @@ export default function Copilot() {
     setMessages((m) => [...m, { role: "user", text: q }]);
     setSending(true);
     try {
-      const r = await api.copilotChat(selectedId, q);
-      setMessages((m) => [
-        ...m,
-        { role: "ai", text: r.answer || r.explanation || r.text || "No response returned." },
-      ]);
+      const { text: answer, available } = readCopilot(await api.copilotChat(selectedId, q));
+      setMessages((m) => [...m, { role: "ai", text: answer, error: !available }]);
     } catch (e) {
       setMessages((m) => [...m, { role: "ai", text: e.message, error: true }]);
     } finally {
@@ -214,7 +213,9 @@ export default function Copilot() {
                 transition={{ duration: 0.3 }}
               >
                 {m.role === "ai" && (
-                  <span className="msg__label">AI-generated explanation based on model analysis</span>
+                  <span className="msg__label">
+                    {m.error ? UNAVAILABLE_LABEL : "AI-generated explanation based on model analysis"}
+                  </span>
                 )}
                 <p>{m.text}</p>
               </motion.div>

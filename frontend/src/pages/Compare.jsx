@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { GitCompare, Sparkles, Sprout } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
+import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
 import { isQualityRow, isVarietyRow } from "../lib/seedHealth";
 import {
   Badge,
@@ -157,11 +158,8 @@ export default function Compare() {
     if (!idA || !idB) return;
     setAi({ state: "loading", text: null });
     try {
-      const r = await api.compareAnalyses([idA, idB]);
-      setAi({
-        state: "ready",
-        text: r.comparison || r.explanation || r.summary || r.text || "No comparison returned.",
-      });
+      const { text, available } = readCopilot(await api.compareAnalyses([idA, idB]));
+      setAi({ state: available ? "ready" : "error", text });
     } catch (e) {
       setAi({ state: "error", text: e.message });
     }
@@ -275,7 +273,11 @@ export default function Compare() {
             {ai.state === "loading" && <Skeleton height="48px" />}
             {(ai.state === "ready" || ai.state === "error") && (
               <div className={`cmp__ai ${ai.state === "error" ? "is-error" : ""}`}>
-                <span className="cmp__ailabel">AI-generated comparison based on model analysis</span>
+                <span className="cmp__ailabel">
+                  {ai.state === "error"
+                    ? UNAVAILABLE_LABEL
+                    : "AI-generated comparison based on model analysis"}
+                </span>
                 <p>{ai.text}</p>
               </div>
             )}

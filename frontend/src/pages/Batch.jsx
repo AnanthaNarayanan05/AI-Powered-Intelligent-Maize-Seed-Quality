@@ -2,6 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { Layers, Images, Sprout, Gauge, Trophy, RotateCcw, Sparkles } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
+import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
 import {
   Badge,
   Button,
@@ -64,8 +65,8 @@ export default function Batch() {
     if (!batch?.batch_id) return;
     setSummary({ state: "loading", text: null });
     try {
-      const r = await api.summarizeBatch(batch.batch_id);
-      setSummary({ state: "ready", text: r.summary || r.explanation || r.text || "No summary returned." });
+      const { text, available } = readCopilot(await api.summarizeBatch(batch.batch_id));
+      setSummary({ state: available ? "ready" : "error", text });
     } catch (e) {
       setSummary({ state: "error", text: e.message });
     }
@@ -238,7 +239,11 @@ export default function Batch() {
             )}
             {(summary.state === "ready" || summary.state === "error") && (
               <div className={`ba__ai ${summary.state === "error" ? "is-error" : ""}`}>
-                <span className="ba__ailabel">AI-generated summary based on model analysis</span>
+                <span className="ba__ailabel">
+                  {summary.state === "error"
+                    ? UNAVAILABLE_LABEL
+                    : "AI-generated summary based on model analysis"}
+                </span>
                 <p>{summary.text}</p>
               </div>
             )}

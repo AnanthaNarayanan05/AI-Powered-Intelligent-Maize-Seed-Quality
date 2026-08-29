@@ -12,6 +12,7 @@ import {
   Ruler,
 } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
+import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
 import {
   Badge,
   Button,
@@ -200,9 +201,9 @@ export default function Analyze() {
     if (!result?.analysis_id) return;
     setAiState("loading");
     try {
-      const r = await api.explainAnalysis(result.analysis_id);
-      setAiText(r.explanation || r.answer || r.text || "No explanation returned.");
-      setAiState("ready");
+      const { text, available } = readCopilot(await api.explainAnalysis(result.analysis_id));
+      setAiText(text);
+      setAiState(available ? "ready" : "error");
     } catch (e) {
       setAiText(e.message);
       setAiState("error");
@@ -623,7 +624,11 @@ export default function Analyze() {
                 )}
                 {(aiState === "ready" || aiState === "error") && (
                   <div className={`an__ai ${aiState === "error" ? "is-error" : ""}`}>
-                    <span className="an__ailabel">AI-generated explanation based on model analysis</span>
+                    <span className="an__ailabel">
+                      {aiState === "error"
+                        ? UNAVAILABLE_LABEL
+                        : "AI-generated explanation based on model analysis"}
+                    </span>
                     <p>{aiText}</p>
                   </div>
                 )}
