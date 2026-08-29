@@ -52,7 +52,9 @@ def _result(analysis_id="a1", **overrides):
         "detection_confidence": 0.91,
         "kernel_px": 50,
         "variety_prediction": {
-            "model": "unified_seed_model_variety", "predicted_class": "Indurata",
+            # The variety head reports the checkpoint name; the quality head below
+            # reports a composite. Both shapes occur, and both must resolve.
+            "model": "unified_seed_model", "predicted_class": "Indurata",
             "confidence": 0.82, "class_probabilities": {"Indurata": 0.82},
         },
         "quality_prediction": {
@@ -175,7 +177,8 @@ def test_save_records_stage_versions_and_segmentation_verdict(temp_db):
 
     assert stored["analysis_stage"] == "classified"
     assert stored["segmentation_status"]["reason"] == "no_served_model"
-    assert stored["model_versions"]["unified_seed_model_variety"]
+    assert stored["model_versions"]["unified_seed_model"]
+    assert stored["model_versions"]["unified_seed_model_quality"]
     assert stored["detections"][0]["kernel_px"] == 50
     assert all(c["model_version"] for c in stored["classifications"])
 
