@@ -210,6 +210,12 @@ class SeedAssessment(Base):
     gate can honestly say a kernel is unlike anything it was trained on; calling
     that a stone, a husk or a cob fragment needs labelled data this project does
     not yet have, so `foreign_object_status` records flagging and never identity.
+
+    The symptom columns are Phase 5's, and carry the same restraint one step
+    further: they record the visible condition category an expert grader would
+    assign, together with the gate's decision about whether it may be asserted at
+    all. A withheld verdict is stored as a withheld verdict, with its reason, and
+    never collapsed into a null that a later reader would take for "no symptom".
     """
 
     __tablename__ = "seed_assessments"
@@ -228,6 +234,23 @@ class SeedAssessment(Base):
     # Phase 4. known_maize | possible_foreign_object. Never a material name.
     foreign_object_status = Column(String, nullable=True)
     foreign_object_basis = Column(String, nullable=True)
+
+    # Phase 5. A visual grading category, never a diagnosis: no column here names
+    # a pathogen, a toxin or a species, and none may be added.
+    #
+    # symptom_class is NULL whenever symptom_status is "withheld", so no query can
+    # read a category off a kernel the gate refused to categorise. The class that
+    # won the argmax is kept in its own column under a name that cannot be
+    # mistaken for the verdict, because "the model nearly said MY and was stopped"
+    # is worth recovering later and is not the same claim.
+    symptom_status = Column(String, nullable=True)   # reported | withheld
+    symptom_reason = Column(String, nullable=True)   # class_not_validated | low_confidence
+    symptom_class = Column(String, nullable=True)
+    symptom_confidence = Column(Float, nullable=True)
+    symptom_argmax_class = Column(String, nullable=True)
+    symptom_argmax_confidence = Column(Float, nullable=True)
+    symptom_threshold = Column(Float, nullable=True)
+    symptom_model = Column(String, nullable=True)
 
     analysis = relationship("Analysis", back_populates="assessments")
 

@@ -74,9 +74,14 @@ def test_system_info_is_read_from_disk_not_hard_coded():
         if m["status"] == "missing":
             assert m["metrics"] == [] or m["trained_at"] is None
 
-    # the served stack is exactly the models the pipeline actually runs
+    # the served stack is exactly the models the pipeline actually runs. Phase 5
+    # added the fifth: the visible-symptom classifier ships as its own checkpoint
+    # rather than as a head on the unified model, because the fine-tune that made
+    # the symptom head usable measurably wrecked variety and quality in the same
+    # weights.
     assert {k for k, m in models.items() if m["served"]} == {
-        "detection", "unified_seed_model", "quality_gate", "maize_identity_gate"
+        "detection", "unified_seed_model", "quality_gate", "maize_identity_gate",
+        "visible_symptom_classifier",
     }
 
 

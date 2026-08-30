@@ -175,6 +175,12 @@ def _add_assessment_row(db, analysis_id: str, seed: dict) -> None:
     These are measured on every kernel already, but until now they travelled inside
     a classification's probability dict, where nothing could query them.
 
+    Since Phase 5 the visible-symptom verdict is stored here too, including the
+    refusals. ``symptom_class`` is null on a withheld verdict by construction --
+    it is read straight off the payload, which already nulls it -- so no query can
+    turn an abstention into a category. ``symptom_argmax_class`` keeps what the
+    model would have said unguarded, under a name that says so.
+
     ``foreign_object_status`` is only ever ``known_maize``,
     ``possible_foreign_object`` or ``unavailable`` -- the last for an object the
     gate declined to score, which a later reader must not fold into either of the
@@ -186,7 +192,8 @@ def _add_assessment_row(db, analysis_id: str, seed: dict) -> None:
     """
     quality = seed.get("quality_prediction") or {}
     foreign = seed.get("foreign_object") or {}
-    if "distribution_distance" not in quality and not foreign:
+    symptom = seed.get("symptom_prediction") or {}
+    if "distribution_distance" not in quality and not foreign and not symptom:
         return
     db.add(SeedAssessment(
         analysis_id=analysis_id,
@@ -198,6 +205,17 @@ def _add_assessment_row(db, analysis_id: str, seed: dict) -> None:
         distribution_model=quality.get("model"),
         foreign_object_status=foreign.get("status"),
         foreign_object_basis=foreign.get("basis"),
+        symptom_status=symptom.get("status"),
+        symptom_reason=symptom.get("reason"),
+        # Already null on the payload when the verdict was withheld. Read through
+        # rather than reconstructed, so the column can never disagree with the
+        # response the caller was given.
+        symptom_class=symptom.get("predicted_class"),
+        symptom_confidence=symptom.get("confidence"),
+        symptom_argmax_class=symptom.get("argmax_class_before_gate"),
+        symptom_argmax_confidence=symptom.get("argmax_confidence"),
+        symptom_threshold=symptom.get("confidence_threshold"),
+        symptom_model=symptom.get("basis"),
     ))
 
 
@@ -357,6 +375,14 @@ def _serialize_analysis(analysis: Analysis) -> dict:
                 "distribution_model": a.distribution_model,
                 "foreign_object_status": a.foreign_object_status,
                 "foreign_object_basis": a.foreign_object_basis,
+                "symptom_status": a.symptom_status,
+                "symptom_reason": a.symptom_reason,
+                "symptom_class": a.symptom_class,
+                "symptom_confidence": a.symptom_confidence,
+                "symptom_argmax_class": a.symptom_argmax_class,
+                "symptom_argmax_confidence": a.symptom_argmax_confidence,
+                "symptom_threshold": a.symptom_threshold,
+                "symptom_model": a.symptom_model,
             }
             for a in analysis.assessments
         ],

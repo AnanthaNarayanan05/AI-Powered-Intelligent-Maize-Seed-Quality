@@ -11,10 +11,17 @@ import {
   RotateCcw,
   Ruler,
   HelpCircle,
+  Stethoscope,
 } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
-import { foreignFlag, foreignUnavailable } from "../lib/seedHealth";
+import {
+  foreignFlag,
+  foreignUnavailable,
+  symptomTally,
+  symptomVerdict,
+  WITHHELD_REASONS,
+} from "../lib/seedHealth";
 import {
   Badge,
   Button,
@@ -58,6 +65,100 @@ function simLabels(s) {
 // be told which: "no model is allowed to serve this task" cannot be fixed with a
 // better photograph, "these kernels are 12 px across" can. Nothing here renders a
 // mask or a coverage number -- an unavailable state, shown honestly, is the feature.
+// Visible-symptom classification, reported at the image level even when it named
+// nothing. Three states have to stay distinguishable here and the panel exists to
+// keep them apart: no model serves the task at all; the model ran and categorised
+// kernels; the model ran and declined on some or all of them. Only the first is a
+// missing capability. The other two are results, and the withheld count is one of
+// them rather than a footnote to it -- kernels the classifier would not commit to
+// are never folded into "no visible symptom".
+//
+// NOT A DIAGNOSIS. Nothing in this panel names a pathogen, a toxin or a species,
+// and the label copy says so where an operator will actually read it.
+function SymptomPanel({ symptom, seeds }) {
+  if (!symptom) return null;
+  const tally = symptomTally(seeds);
+  const served = symptom.status === "available";
+  const descriptions = symptom.class_descriptions || {};
+  const withheldClasses = symptom.withheld_classes || {};
+
+  return (
+    <GlassCard className="an__seg">
+      <div className="an__rowhead">
+        <span className="an__eyebrow">
+          <Stethoscope size={13} /> Visible defect &amp; symptom classification
+        </span>
+        <Badge tone={served ? (tally.named ? "ok" : "warn") : "neutral"}>
+          {served
+            ? tally.named
+              ? `${tally.named} of ${tally.scored} categorised`
+              : "no category asserted"
+            : "Unavailable"}
+        </Badge>
+      </div>
+
+      {!served ? (
+        <p className="an__disclaimer">
+          {symptom.message ||
+            "No verified model is registered to serve visible-symptom classification, so no condition category is produced for any kernel."}
+        </p>
+      ) : (
+        <>
+          <p className="an__disclaimer">
+            Categories describe how a kernel <em>looks</em>, in the vocabulary expert
+            graders used to record it. This is not a disease diagnosis — no pathogen,
+            toxin or species is identified anywhere in this system.
+          </p>
+
+          {tally.scored > 0 && (
+            <div className="an__symptomcounts">
+              {Object.entries(tally.categories)
+                .sort((a, b) => b[1] - a[1])
+                .map(([name, n]) => (
+                  <span key={name} className="an__symptomchip" title={descriptions[name] || name}>
+                    <b className="mono">{n}</b> {descriptions[name] || name}
+                  </span>
+                ))}
+              {/* Its own chips, in a quieter tone. A withheld kernel is not a
+                  clean kernel and must not be counted as one. */}
+              {Object.entries(tally.withheld).map(([reason, n]) => (
+                <span key={reason} className="an__symptomchip an__symptomchip--withheld">
+                  <b className="mono">{n}</b> withheld —{" "}
+                  {WITHHELD_REASONS[reason] || pretty(reason)}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {Object.keys(withheldClasses).length > 0 && (
+            <p className="an__disclaimer">
+              Never asserted:{" "}
+              {Object.entries(withheldClasses)
+                .map(([name, why]) => `${descriptions[name] || name} (${why})`)
+                .join("; ")}
+              .
+            </p>
+          )}
+
+          <p className="an__model faint mono">
+            {symptom.model} · floor {symptom.confidence_threshold} · held-out coverage{" "}
+            {symptom.held_out_coverage != null
+              ? `${Math.round(symptom.held_out_coverage * 100)}%`
+              : "—"}{" "}
+            at{" "}
+            {symptom.held_out_accuracy != null
+              ? `${Math.round(symptom.held_out_accuracy * 100)}%`
+              : "—"}{" "}
+            accuracy
+            {symptom.calibration_optimism != null &&
+              ` · validation ran ${Math.round(symptom.calibration_optimism * 100)} pts optimistic`}
+          </p>
+        </>
+      )}
+    </GlassCard>
+  );
+}
+
 function SegmentationPanel({ segmentation }) {
   if (!segmentation) return null;
   const { status, reason, message, model, resolution: res } = segmentation;
@@ -348,6 +449,10 @@ export default function Analyze() {
               </div>
 
               <SegmentationPanel segmentation={result.segmentation} />
+              <SymptomPanel
+                symptom={result.visible_symptom}
+                seeds={result.seeds}
+              />
 
               <div className="an__grid">
                 {/* image + boxes */}
@@ -436,6 +541,57 @@ export default function Analyze() {
                           <p className="muted">Quality model unavailable for this analysis.</p>
                         )}
                       </GlassCard>
+
+                      {/* Reported and withheld are both rendered, in different
+                          visual languages. A seed whose verdict was withheld
+                          shows the refusal and its reason; it must not look like
+                          a seed that came back clean. */}
+                      {symptomVerdict(active)?.reported && (
+                        <GlassCard className="an__resultcard">
+                          <div className="an__rowhead">
+                            <span className="an__eyebrow">
+                              <Stethoscope size={13} /> Visible symptom
+                            </span>
+                            <Badge tone="ok">not a diagnosis</Badge>
+                          </div>
+                          <h3 className="an__predict">
+                            {symptomVerdict(active).description ||
+                              symptomVerdict(active).category}
+                          </h3>
+                          <ConfidenceBar
+                            value={symptomVerdict(active).confidence}
+                            label="Confidence"
+                          />
+                          <p className="an__disclaimer">
+                            {symptomVerdict(active).caveat}
+                          </p>
+                        </GlassCard>
+                      )}
+
+                      {symptomVerdict(active) && !symptomVerdict(active).reported && (
+                        <GlassCard className="an__resultcard">
+                          <div className="an__rowhead">
+                            <span className="an__eyebrow">
+                              <Stethoscope size={13} /> Visible symptom
+                            </span>
+                            <Badge>withheld</Badge>
+                          </div>
+                          <h3 className="an__predict muted">No category reported</h3>
+                          {/* No confidence bar. A percentage here would be the
+                              confidence of a prediction that was not made. */}
+                          <p className="an__disclaimer">
+                            {symptomVerdict(active).caveat}
+                          </p>
+                          <p className="an__model faint mono">
+                            closest category held (not the verdict):{" "}
+                            {symptomVerdict(active).nearest || "—"} at{" "}
+                            {symptomVerdict(active).nearestConfidence != null
+                              ? `${Math.round(symptomVerdict(active).nearestConfidence * 100)}%`
+                              : "—"}{" "}
+                            · floor {symptomVerdict(active).threshold}
+                          </p>
+                        </GlassCard>
+                      )}
 
                       {foreignFlag(active) && (
                         <GlassCard accent="warn" className="an__resultcard">

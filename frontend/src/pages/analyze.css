@@ -411,3 +411,37 @@
   margin: 0;
   font-size: var(--text-xs);
 }
+
+/* Visible-symptom tallies. Named categories and withheld counts share a row so
+   they are read together, but never share a treatment: the withheld chips are
+   deliberately quieter and outlined rather than filled, because they report an
+   absence of a verdict and must not carry the visual weight of a finding. */
+.an__symptomcounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+.an__symptomchip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  background: var(--glass-2, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+}
+
+.an__symptomchip b {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.an__symptomchip--withheld {
+  background: transparent;
+  opacity: 0.72;
+  border-style: dashed;
+}

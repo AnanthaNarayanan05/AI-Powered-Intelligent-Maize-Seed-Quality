@@ -185,6 +185,19 @@ STAGES: dict[str, Stage] = {
         expensive=True,
         describe="Pixel mask of the defective region on each kernel.",
     ),
+    "symptom": Stage(
+        name="symptom",
+        # expensive=True, unlike `foreign`, and the difference is real: the
+        # visible-symptom capability lives in its OWN checkpoint, so this stage
+        # is a second full forward pass per kernel rather than a derived reading
+        # off the pass classify already made. It is kept out of classify for the
+        # same reason `foreign` is -- a build with no calibrated symptom gate
+        # must still be able to answer "what variety is this".
+        tasks=("visible_symptom",),
+        needs=("detect",),
+        expensive=True,
+        describe="Name the visible condition category, or state why it is withheld.",
+    ),
     "similarity": Stage(
         name="similarity",
         tasks=("embedding",),
@@ -262,6 +275,33 @@ INTENTS: tuple[Intent, ...] = (
         ),
     ),
     Intent(
+        name="visible_symptom",
+        canonical="What visible condition do these kernels show?",
+        # Matched BEFORE find_defects, and it takes the condition words with it.
+        # "Are any of these mouldy" asks which CATEGORY a kernel falls in, and
+        # answering that with the binary Good/Bad grade would answer a different
+        # question in a way the reader cannot see. "crack" stays with
+        # find_defects: `cracked` is a segmentation channel, and the nearest
+        # class here is BN (broken), which is not the same thing.
+        #
+        # "diagnose" and "disease" route here on purpose. They are the phrasings
+        # this project must NOT answer as asked, and routing them to the one
+        # capability whose every payload carries is_diagnosis=False is how the
+        # refusal reaches the person who used the word.
+        stages=("detect", "symptom"),
+        capability=None,
+        patterns=(
+            r"\bsymptom",
+            r"\bcondition\b",
+            r"\bmould|\bmold|\bmildew|\bfungus|\bfungal|\bfusarium",
+            r"\binsect|\bpest|\bweevil|\bbore",
+            r"\bsprout|\bgerminat",
+            r"\bheat damage|\bdiscolo",
+            r"\bwhat (kind|type) of (damage|defect|problem)",
+            r"\bdiagnos|\bdisease|\bpathogen",
+        ),
+    ),
+    Intent(
         name="find_defects",
         canonical="Find defective seeds",
         stages=("detect", "classify", "resolution"),
@@ -271,7 +311,7 @@ INTENTS: tuple[Intent, ...] = (
             r"\bdamaged?\b",
             r"\bbad (seeds?|kernels?)\b",
             r"\bwhich .*\b(bad|spoil|reject)",
-            r"\bmould|\bmold|\bfungus|\bfungal|\binsect|\bcrack",
+            r"\bcrack",
         ),
     ),
     Intent(
@@ -292,7 +332,10 @@ INTENTS: tuple[Intent, ...] = (
     Intent(
         name="analyze",
         canonical="Analyze these seeds",
-        stages=("detect", "classify", "resolution", "similarity"),
+        # `symptom` is in the broad plan because AnalysisPipeline.analyze_image
+        # runs it by default: the two entry points into this project must not
+        # disagree about what a full analysis of an image contains.
+        stages=("detect", "classify", "resolution", "symptom", "similarity"),
         capability=None,
         patterns=(
             r"\banal[iy][sz]e\b",
@@ -640,6 +683,20 @@ class Orchestrator:
             results[seed["seed_index"]] = self.pipeline.segment_defects(crop, bbox=seed["bbox"])
         return results
 
+    def _run_symptom(self, state: RunState, params: tuple) -> dict:
+        """One verdict per detected kernel, including the refusals.
+
+        Withheld kernels are kept rather than dropped. A caller that only ever
+        saw the reported ones would read a clean sheet where the truth is that
+        the model looked and would not commit, and those are different facts.
+        """
+        image = self._image(state)
+        out = {}
+        for seed in state.stages["detect"].value:
+            crop = self.pipeline.crop_seed(image, seed["bbox"])
+            out[seed["seed_index"]] = self.pipeline.classify_symptom(crop)
+        return out
+
     def _run_similarity(self, state: RunState, params: tuple) -> dict:
         top_k = params[0] if params else 5
         image = self._image(state)
@@ -667,6 +724,7 @@ class Orchestrator:
         classify = state.stages.get("classify")
         similarity = state.stages.get("similarity")
         segment = state.stages.get("segment")
+        symptom = state.stages.get("symptom")
 
         seeds = []
         for seed in detect.value:
@@ -676,6 +734,11 @@ class Orchestrator:
                 entry.update(classify.value.get(index, {}))
             if similarity is not None and similarity.usable:
                 entry["similarity_results"] = similarity.value.get(index, [])
+            if symptom is not None and symptom.usable:
+                # Under the same key AnalysisPipeline.analyze_image writes, so a
+                # consumer does not have to know which entry point produced the
+                # seed it is holding.
+                entry["symptom_prediction"] = symptom.value.get(index)
             if segment is not None and segment.usable:
                 mask = segment.value.get(index, {})
                 # The planes themselves stay in the cache. What travels is
@@ -779,9 +842,18 @@ class Orchestrator:
             "variety_distribution": varieties,
             "average_variety_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
             "quality": self._quality_breakdown(seeds),
+            # The broad plan runs the symptom stage, so the broad answer reports
+            # it. Nested rather than flattened in: it carries its own operating
+            # point and its own two "what this does not mean" clauses, and those
+            # are not true of the variety and grade figures beside it.
+            "visible_symptom": self._answer_visible_symptom(state, seeds),
             "caveats": [
                 "Variety and grade are whole-kernel predictions. Neither says which part of "
                 "a kernel is affected, and neither is a defect area.",
+                "The Good/Bad grade and the visible-symptom category are separate "
+                "judgements from separate models. A kernel graded Bad with no symptom "
+                "category reported is not a contradiction: the grade committed and the "
+                "symptom classifier did not.",
             ],
         }
 
@@ -865,6 +937,94 @@ class Orchestrator:
                 ),
             }
         return answer
+
+    def _answer_visible_symptom(self, state: RunState, seeds: list[dict]) -> dict:
+        """Categories a grader would assign, counted -- and the silences counted too.
+
+        APPEARANCE, NOT AETIOLOGY, and the payload says so in a field rather than
+        only in prose: `is_diagnosis` is False, and no pathogen, toxin or species
+        is named anywhere in this system. The label set is GrainSpace's expert
+        grading vocabulary, so "FM" is the grader category "fusarium & mildew"
+        and not a fusarium finding.
+
+        Withheld kernels get their own buckets for the same reason the
+        distribution gate gets one in `_quality_breakdown`: a kernel the model
+        declined to categorise is not a kernel with no visible symptom, and
+        adding it to the NOR count would turn an abstention into a clean result.
+        """
+        stage = state.stages.get("symptom")
+        status = self.pipeline.symptom_status()
+        if stage is None or not stage.usable:
+            return {
+                "capability": "visible_symptom_classification",
+                "label": "Visible defect & symptom classification",
+                "available": False,
+                "reason": stage.reason if stage else "not_run",
+                "message": (stage.message if stage else
+                            "The visible-symptom stage did not run for this image."),
+                "is_diagnosis": False,
+                "capability_status": status,
+            }
+
+        verdicts = stage.value
+        named: dict[str, int] = {}
+        withheld: dict[str, list[int]] = {"class_not_validated": [], "low_confidence": []}
+        reported_indices = []
+        for index, verdict in verdicts.items():
+            if verdict["status"] == "reported":
+                named[verdict["predicted_class"]] = named.get(verdict["predicted_class"], 0) + 1
+                reported_indices.append(index)
+            else:
+                withheld.setdefault(verdict["reason"], []).append(index)
+
+        n = len(verdicts)
+        return {
+            "capability": "visible_symptom_classification",
+            "label": "Visible defect & symptom classification",
+            "available": True,
+            "reason": None,
+            "is_diagnosis": False,
+            "kernels_scored": n,
+            "categorised": len(reported_indices),
+            "withheld": sum(len(v) for v in withheld.values()),
+            # The share of THIS image the model would commit to. Reported beside
+            # the held-out coverage below rather than instead of it, because the
+            # two are measurements of different things and the gap between them
+            # is the interesting part.
+            "coverage": round(len(reported_indices) / n, 4) if n else None,
+            "category_counts": named,
+            "seed_indices": reported_indices,
+            "withheld_indices": withheld,
+            "class_descriptions": status.get("class_descriptions", {}),
+            "basis": status.get("model"),
+            "operating_point": {
+                "confidence_threshold": status.get("confidence_threshold"),
+                "validated_classes": status.get("validated_classes"),
+                "withheld_classes": status.get("withheld_classes"),
+                "held_out_coverage": status.get("held_out_coverage"),
+                "held_out_accuracy": status.get("held_out_accuracy"),
+                "calibration_optimism": status.get("calibration_optimism"),
+            },
+            "what_it_means": (
+                "Each category is the class an expert GrainSpace grader would file the "
+                "kernel under from its appearance. Two of the seven classes are never "
+                "asserted at all, and a prediction below the calibrated floor is "
+                "withheld rather than reported."
+            ),
+            "what_it_does_not_mean": (
+                "It is not a disease diagnosis. Nothing in this project identifies a "
+                "pathogen, a toxin or a species, and an image-level grading label could "
+                "not support such a claim. A withheld kernel is not a healthy kernel: it "
+                "is one the model declined to categorise, and it is counted separately."
+            ),
+            "caveats": [
+                "Labels come from GrainSpace M600 kernel crops. The images this platform "
+                "is given are YOLO crops from user uploads, a different domain; "
+                "outputs/metrics/symptom_serving_domain.json records what the gate "
+                "measurably does there, and no accuracy can be computed for that domain "
+                "because those uploads carry no visible-condition labels.",
+            ],
+        }
 
     def _answer_foreign_objects(self, state: RunState, seeds: list[dict]) -> dict:
         """FLAGGING, not CLASSIFICATION -- and the answer says so in its own body.

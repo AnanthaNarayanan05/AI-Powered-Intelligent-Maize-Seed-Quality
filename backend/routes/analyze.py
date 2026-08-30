@@ -83,6 +83,12 @@ async def analyze_batch(
     # apart from those it scored and passed, because "not flagged" and "not
     # examined" are different statements and only one of them is about the object.
     flagged, scored, not_scored = 0, 0, 0
+    # Same accounting for visible symptoms, and for the same reason: a kernel the
+    # classifier declined to categorise must not be counted into any category,
+    # least of all NOR. The withheld tally is reported beside the named ones so a
+    # batch where the model mostly abstained cannot read as a batch of clean seed.
+    symptom_dist: dict[str, int] = {}
+    symptom_withheld: dict[str, int] = {}
 
     for file in files:
         try:
@@ -106,6 +112,13 @@ async def analyze_batch(
                 if seed.get("synthetic_defect_prediction"):
                     sp = seed["synthetic_defect_prediction"]
                     quality_dist[sp["predicted_class"]] = quality_dist.get(sp["predicted_class"], 0) + 1
+                sp = seed.get("symptom_prediction")
+                if sp:
+                    if sp["status"] == "reported":
+                        name = sp["predicted_class"]
+                        symptom_dist[name] = symptom_dist.get(name, 0) + 1
+                    else:
+                        symptom_withheld[sp["reason"]] = symptom_withheld.get(sp["reason"], 0) + 1
                 if seed.get("foreign_object"):
                     status = seed["foreign_object"]["status"]
                     if status == "unavailable":
@@ -140,6 +153,14 @@ async def analyze_batch(
             "objects_not_scored": not_scored,
             "is_classification": False,
         } if scored or not_scored else None,
+        # Grading categories, not diagnoses, and the count of kernels the gate
+        # would not categorise is part of the result rather than a footnote to it.
+        "visible_symptoms": {
+            "kernels_scored": sum(symptom_dist.values()) + sum(symptom_withheld.values()),
+            "category_counts": symptom_dist,
+            "withheld_counts": symptom_withheld,
+            "is_diagnosis": False,
+        } if symptom_dist or symptom_withheld else None,
     }
 
     batch_id = str(uuid.uuid4())

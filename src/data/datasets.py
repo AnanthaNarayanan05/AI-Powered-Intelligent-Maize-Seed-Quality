@@ -133,3 +133,71 @@ class UnifiedSeedDataset:
         v = self.variety_to_idx.get(row.get("variety_label") or "", -1)
         q = self.quality_to_idx.get(row.get("quality_label") or "", -1)
         return img, v, q
+
+
+class SymptomDataset:
+    """Single-task dataset over manifest_symptom.csv.
+
+    Returns (image, symptom_idx). Every row in that manifest carries a grader
+    label by construction -- the manifest builder only walks labelled condition
+    directories -- so an unmapped label here means the class list passed in
+    disagrees with the manifest, which is a bug worth raising rather than a row
+    worth silently masking to -1.
+    """
+
+    def __init__(self, manifest_path: str, split: str,
+                 symptom_classes: list[str], transform=None):
+        self.rows = _read_manifest(manifest_path, split)
+        self.symptom_classes = symptom_classes
+        self.symptom_to_idx = {c: i for i, c in enumerate(symptom_classes)}
+        self.transform = transform
+        unknown = {r["symptom_label"] for r in self.rows} - set(self.symptom_to_idx)
+        if unknown:
+            raise ValueError(
+                f"{manifest_path} split={split!r} contains labels not in the class "
+                f"list: {sorted(unknown)}"
+            )
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, idx):
+        row = self.rows[idx]
+        img = Image.open(row["filepath"]).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        return img, self.symptom_to_idx[row["symptom_label"]]
+
+
+class TriTaskSeedDataset:
+    """Three-task dataset over a manifest carrying variety, quality and symptom
+    columns, any of which may be blank for a given row.
+
+    Returns (image, variety_idx, quality_idx, symptom_idx) where -1 marks a label
+    that was never collected for that image, matching the ignore_index the
+    training loop is configured with. As in UnifiedSeedDataset, -1 is an absence
+    of evidence, never a stand-in for an assumed value: no GrainSpace crop is
+    given a variety, and no Mendeley kernel is given a visible-condition grade.
+    """
+
+    def __init__(self, manifest_path: str, split: str, variety_classes: list[str],
+                 quality_classes: list[str], symptom_classes: list[str], transform=None):
+        self.rows = _read_manifest(manifest_path, split)
+        self.maps = [
+            {c: i for i, c in enumerate(variety_classes)},
+            {c: i for i, c in enumerate(quality_classes)},
+            {c: i for i, c in enumerate(symptom_classes)},
+        ]
+        self.cols = ["variety_label", "quality_label", "symptom_label"]
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, idx):
+        row = self.rows[idx]
+        img = Image.open(row["filepath"]).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        labels = [m.get(row.get(c) or "", -1) for m, c in zip(self.maps, self.cols)]
+        return (img, *labels)

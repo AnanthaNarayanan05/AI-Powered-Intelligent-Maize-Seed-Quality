@@ -29,6 +29,7 @@ tasks:
   defect_segmentation: Produce a pixel mask of the defective region.
   defect_pattern:      Name the visible defect pattern on a kernel.
   foreign_object_flag: Flag an object as unlike known maize. Never names what it is.
+  visible_symptom:     Name the visible condition category a grader would assign a kernel.
 
 models:
   - key: detection
@@ -135,6 +136,47 @@ models:
     input:
       kind: embedding
       dim: 1280
+    requires_resolution: null
+
+  - key: visible_symptom_classifier
+    name: Visible symptom classifier
+    version: 1.0.0
+    architecture: >-
+      EfficientNet-B0 + cognitive attention, 7 classes, fine-tuned end to end on
+      GrainSpace condition labels, with a two-part abstention gate -- five
+      validated classes and a 0.55 softmax floor
+    task: visible_symptom
+    serves: [visible_symptom]
+    role: >-
+      Reproduces the VISIBLE CONDITION CATEGORY a GrainSpace grader assigned to a
+      kernel. It describes appearance, never aetiology: FM is the grader category
+      "fusarium & mildew" and a prediction of FM is not a fusarium diagnosis, and
+      nothing here identifies a pathogen, a toxin or a species. Gated, it names a
+      category for 56.9% of held-out kernels and is correct on 76.9% of those;
+      the other 43.1% are returned as withheld, not guessed.
+    checkpoint: symptom_classifier_finetune_best.pt
+    metrics: symptom_classifier_finetune
+    dataset: manifest_symptom
+    label_provenance: >-
+      GrainSpace M600 val split -- expert grader condition directories, used as
+      given. Real maize KERNEL imagery: no synthetic damage, no propagated
+      labels, and no maize leaf-disease dataset standing in for kernels. The
+      1,260 labelled crops are the entire supply available to this project, since
+      the GrainSpace train half is organised by cultivar and carries no condition
+      annotation at all.
+    trained_by: >-
+      python -m src.training.train_symptom --stage finetune --epochs 30 --lr 0.0001
+      && python -m src.analysis.calibrate_symptom
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    # Two of the seven classes are never asserted. HD holds 9 validation crops and
+    # SD holds 2, which is below the support at which an operating point can be
+    # measured, so when either wins the argmax the answer is withheld rather than
+    # reported. They are listed here because a served model's silences are part of
+    # its specification.
+    withheld_classes: [HD, SD]
     requires_resolution: null
 
   - key: variety_a_full

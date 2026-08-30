@@ -14,6 +14,7 @@ clear API error rather than a crash (Phase 14/29 requirement).
 """
 from __future__ import annotations
 
+import json
 import os
 import statistics
 import uuid
@@ -59,6 +60,8 @@ class AnalysisPipeline:
         self._quality_reference = None
         self._maize_reference = None
         self._synthetic_model = None
+        self._symptom_model = None
+        self._symptom_gate = None
         self._faiss_indices: dict[str, object] = {}
         self._registry = None
         self._eval_transform = None
@@ -502,6 +505,241 @@ class AnalysisPipeline:
                                             scene_objects=scene_objects)
         return variety, quality, foreign
 
+    # ---------- visible symptom ----------
+    def _get_symptom_gate(self, checkpoint: str) -> dict:
+        """The calibrated abstention rule that decides what this model may say.
+
+        Loaded from disk beside the checkpoint, never written here. The rule has
+        two independent parts -- which classes are validated at all, and the
+        softmax floor a retained prediction must clear -- and both were chosen on
+        the validation split by src/analysis/calibrate_symptom.py. Restating
+        either of them in this file would create a second answer that drifts from
+        the measured one the moment the model is recalibrated.
+
+        The gate carries the SHA-256 of the checkpoint it was calibrated against
+        and it is checked here. A threshold calibrated on one set of weights says
+        nothing about another set, so a mismatch is a refusal to serve rather than
+        a warning: the alternative is asserting categories under an operating
+        point that was never measured for them.
+        """
+        if self._symptom_gate is None:
+            from src.registry.model_registry import checkpoint_sha256
+
+            path = os.path.join(os.path.dirname(checkpoint), "symptom_gate.json")
+            if not os.path.exists(path):
+                raise ModelNotAvailableError(
+                    "the visible-symptom classifier is present but has not been "
+                    f"calibrated: {path} is missing. Run "
+                    "python -m src.analysis.calibrate_symptom. Until then the model "
+                    "has no measured operating point and is not served."
+                )
+            with open(path, encoding="utf-8") as f:
+                gate = json.load(f)
+            recorded = gate.get("checkpoint_sha256")
+            actual = checkpoint_sha256(checkpoint)
+            if recorded and recorded != actual:
+                raise ModelNotAvailableError(
+                    "the visible-symptom gate was calibrated against a different "
+                    f"checkpoint ({recorded[:12]} != {actual[:12]}). Its class "
+                    "eligibility and confidence floor were measured on weights "
+                    "that are no longer on disk, so they do not describe this "
+                    "model. Recalibrate before serving."
+                )
+            self._symptom_gate = gate
+        return self._symptom_gate
+
+    def _get_symptom_model(self):
+        """The specialised visible-symptom classifier, and only that.
+
+        This is deliberately NOT the unified model. The frozen-trunk head reached
+        0.2605 test macro-F1 on this task and a joint fine-tune reached 0.2343
+        while costing the quality head a measured 0.0096 F1; only fine-tuning the
+        whole trunk on symptom labels alone reached 0.5865, and doing that
+        destroys variety (0.9316 -> 0.5048) and quality (0.9721 -> 0.5800) in the
+        same weights. So the capability lives in its own checkpoint, the shipped
+        unified model is not touched at all, and this model is never asked for a
+        variety or a quality grade -- it would answer, and its answer would be
+        worthless. The registry enforces that by declaring `serves:
+        [visible_symptom]` and nothing else.
+
+        Returns (model, classes, gate).
+        """
+        if self._symptom_model is None:
+            try:
+                import torch
+                from src.models.unified_model import UnifiedSeedModel
+            except ImportError as e:
+                raise ModelNotAvailableError(
+                    "torch/torchvision is not installed in this environment. "
+                    "Run: pip install torch torchvision"
+                ) from e
+
+            ckpt_path = self._checkpoint_for("visible_symptom")
+            gate = self._get_symptom_gate(ckpt_path)
+            state = torch.load(ckpt_path, map_location=self.device)
+            model = UnifiedSeedModel(
+                state["variety_classes"], state["quality_classes"],
+                backbone_name=self.cfg["backbone"], pretrained=False,
+                use_attention=state.get("use_attention", True),
+                symptom_classes=state["symptom_classes"],
+            ).to(self.device)
+            model.load_state_dict(state["model_state_dict"])
+            model.eval()
+            self._symptom_model = (model, state["symptom_classes"], gate)
+        return self._symptom_model
+
+    def classify_symptom(self, crop_image) -> dict:
+        """The visible condition category a grader would assign this kernel, or a
+        stated refusal to assign one.
+
+        APPEARANCE, NOT AETIOLOGY. Every label here is the category an expert
+        GrainSpace grader filed a kernel under by looking at it. FM is the grader
+        category "fusarium & mildew" and a prediction of FM is not a fusarium
+        diagnosis; nothing in this project identifies a pathogen, a toxin or a
+        species, and no image-level label could support such a claim.
+
+        The result is gated twice before it is allowed to be a prediction. Two of
+        the seven classes are never asserted -- HD has 9 validation crops and SD
+        has 2, which is below the support at which an operating point can be
+        measured at all -- and a retained prediction must clear the calibrated
+        softmax floor. Failing either returns a withheld result carrying the
+        reason, not a guess and not a silent None: the caller has to be able to
+        tell "the model looked and would not commit" from "nothing ran".
+
+        The class that won the argmax is reported even when withheld, under a name
+        that cannot be mistaken for the answer, because a reader deciding whether
+        to send a kernel for manual grading is better served by knowing what the
+        model nearly said than by a blank.
+        """
+        import torch
+
+        model, classes, gate = self._get_symptom_model()
+        validated = gate["validated_classes"]
+        tau = float(gate["confidence_threshold"])
+        descriptions = gate.get("class_descriptions", {})
+
+        tensor = self._get_eval_transform()(crop_image).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            logits = model.forward_heads(tensor)["symptom"]
+            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+
+        idx = int(np.argmax(probs))
+        winner, confidence = classes[idx], float(probs[idx])
+        held_out = gate.get("test_at_threshold", {})
+
+        out = {
+            "basis": "visible_symptom_classifier",
+            "confidence_threshold": round(tau, 4),
+            "validated_classes": validated,
+            # Named this way on purpose. It is what the model would have said with
+            # no gate in front of it, and it is NOT the served answer when the
+            # status below is "withheld".
+            "argmax_class_before_gate": winner,
+            "argmax_confidence": round(confidence, 4),
+            "class_probabilities": {c: round(float(p), 4) for c, p in zip(classes, probs)},
+            # A grading category, not a diagnosis. Carried on the payload rather
+            # than only in prose so a consumer cannot present it as one by
+            # accident.
+            "is_diagnosis": False,
+            "label_source": ("GrainSpace M600 expert grader condition categories "
+                             "(visual grading, real maize kernels)"),
+            # The operating point rides on every verdict for the same reason the
+            # foreign-object limits do: a caller summarising an image reads it off
+            # whichever verdict it has.
+            "measured_coverage": held_out.get("coverage"),
+            "measured_accuracy": held_out.get("accuracy"),
+        }
+
+        if winner not in validated:
+            out["status"] = "withheld"
+            out["reason"] = "class_not_validated"
+            out["predicted_class"] = None
+            out["description"] = None
+            out["confidence"] = None
+            out["caveat"] = (
+                f"No visible-symptom category is reported for this kernel. The "
+                f"closest category the model holds is one it is not permitted to "
+                f"assert: " + gate["withheld_classes"].get(
+                    winner, f"{winner} is not a validated class") + ". Withheld "
+                "rather than reported -- a category the evidence cannot support is "
+                "worse than no category, because it gets acted on."
+            )
+            return out
+
+        if confidence < tau:
+            out["status"] = "withheld"
+            out["reason"] = "low_confidence"
+            out["predicted_class"] = None
+            out["description"] = None
+            out["confidence"] = None
+            out["caveat"] = (
+                f"No visible-symptom category is reported for this kernel. The "
+                f"model's best category scored {confidence:.2f}, below the {tau:.2f} "
+                "floor calibrated on held-out data. Below that floor its retained "
+                "predictions do not reach the accuracy this capability is served at."
+            )
+            return out
+
+        out["status"] = "reported"
+        out["reason"] = None
+        out["predicted_class"] = winner
+        out["description"] = descriptions.get(winner)
+        out["confidence"] = round(confidence, 4)
+        out["caveat"] = (
+            "Visible condition category assigned from appearance. It describes how "
+            "the kernel LOOKS to a grader and is not a pathogen, toxin or species "
+            "identification"
+            + (f". At this setting the capability names a category for "
+               f"{held_out['coverage']:.0%} of held-out kernels and is correct on "
+               f"{held_out['accuracy']:.0%} of those."
+               if held_out.get("coverage") is not None else ".")
+        )
+        return out
+
+    def symptom_status(self) -> dict:
+        """What this build is allowed to say about visible symptoms, image aside.
+
+        Reported once per analysis and reported even when nothing ran, because
+        "no model serves this task" and "the model looked at every kernel and
+        committed to none" are different facts and a reader who sees an empty
+        column needs to know which one produced it.
+        """
+        try:
+            record = self._record_for("visible_symptom")
+            model, classes, gate = self._get_symptom_model()
+        except ModelNotAvailableError as e:
+            return {
+                "status": "unavailable",
+                "reason": "no_served_model",
+                "message": str(e),
+                "model": None,
+            }
+        held_out = gate.get("test_at_threshold", {})
+        return {
+            "status": "available",
+            "reason": None,
+            "message": None,
+            "model": record.key,
+            "classes": classes,
+            "class_descriptions": gate.get("class_descriptions", {}),
+            "validated_classes": gate["validated_classes"],
+            # The silences are part of the specification, so they are published
+            # with the reason each class earned rather than left as an absence.
+            "withheld_classes": gate["withheld_classes"],
+            "confidence_threshold": gate["confidence_threshold"],
+            "selection_rule": gate.get("selection_rule"),
+            "held_out_coverage": held_out.get("coverage"),
+            "held_out_accuracy": held_out.get("accuracy"),
+            # The threshold was chosen on validation, which flatters it. Carried
+            # so the served figure is never quoted without the gap beside it.
+            "calibration_optimism": gate.get("calibration_transfer", {}).get("optimism"),
+            "is_diagnosis": False,
+            "note": ("VISIBLE DEFECT & SYMPTOM CLASSIFICATION. Categories describe "
+                     "kernel appearance as an expert grader recorded it. This is not "
+                     "disease diagnosis: no pathogen, toxin or species is identified "
+                     "anywhere in this system."),
+        }
+
     def _get_synthetic_model(self):
         if self._synthetic_model is None:
             try:
@@ -844,7 +1082,7 @@ class AnalysisPipeline:
         index = self._get_faiss_index(dataset)
         return index.search(embedding, top_k)
 
-    GRADCAM_HEADS = ("variety", "quality")
+    GRADCAM_HEADS = ("variety", "quality", "symptom")
 
     def generate_gradcam(
         self,
@@ -871,7 +1109,15 @@ class AnalysisPipeline:
         if head not in self.GRADCAM_HEADS:
             raise ValueError(f"head must be one of {self.GRADCAM_HEADS}, got {head!r}")
 
-        if dataset == "unified":
+        if dataset == "unified" and head == "symptom":
+            # The symptom head lives in its own checkpoint, so its heatmap has to
+            # come from those weights. A CAM taken off the unified trunk would be
+            # explaining a model that never made this prediction -- and cannot,
+            # since it has no symptom head at all.
+            model, classes, _gate = self._get_symptom_model()
+            model_name = "visible_symptom_classifier"
+            experiment_used = None
+        elif dataset == "unified":
             model, classes, quality_classes = self._get_unified_model()
             classes = classes if head == "variety" else quality_classes
             model_name = "unified_seed_model" if head == "variety" else "unified_seed_model_quality"
@@ -906,7 +1152,7 @@ class AnalysisPipeline:
         return cam, meta
 
     # ---------- orchestration ----------
-    def analyze_image(self, image_path: str, variety_dataset: str = "unified", run_similarity: bool = True, run_synthetic_defect: bool = False, top_k: int = 5) -> dict:
+    def analyze_image(self, image_path: str, variety_dataset: str = "unified", run_similarity: bool = True, run_synthetic_defect: bool = False, run_symptom: bool = True, top_k: int = 5) -> dict:
         """variety_dataset defaults to "unified": one model, six varieties, plus a
         real quality head. "a"/"b" still select the older single-dataset models so
         the ablation results in docs/09 remain reproducible, but they are not what
@@ -925,6 +1171,7 @@ class AnalysisPipeline:
         if len(detections) == 0:
             result["warnings"].append("No seeds detected above the confidence threshold.")
             result["segmentation"] = self.segmentation_status([])
+            result["visible_symptom"] = self.symptom_status()
             return result
 
         for i, det in enumerate(detections):
@@ -961,6 +1208,18 @@ class AnalysisPipeline:
                     seed_entry["variety_prediction"] = None
                     result["warnings"].append(str(e))
 
+            if run_symptom:
+                # A second forward pass on the same crop, because the capability
+                # lives in a second checkpoint. Precedented -- detection, the
+                # quality gate, the maize-identity gate and the segmenters are all
+                # separate models -- and the cost buys not damaging the variety and
+                # quality heads that already work.
+                try:
+                    seed_entry["symptom_prediction"] = self.classify_symptom(crop)
+                except ModelNotAvailableError as e:
+                    seed_entry["symptom_prediction"] = None
+                    result["warnings"].append(f"Visible-symptom classification unavailable: {e}")
+
             if run_synthetic_defect:
                 try:
                     seed_entry["synthetic_defect_prediction"] = self.classify_synthetic_defect(crop)
@@ -990,6 +1249,10 @@ class AnalysisPipeline:
         result["segmentation"] = self.segmentation_status(
             [s["kernel_px"] for s in result["seeds"]]
         )
+        # Stated once per image rather than repeated on every kernel: which
+        # categories this build may assert, which it never will and why, and the
+        # held-out coverage/accuracy the gate actually delivers.
+        result["visible_symptom"] = self.symptom_status()
 
         result["warnings"] = list(dict.fromkeys(result["warnings"]))  # dedupe, preserve order
         return result

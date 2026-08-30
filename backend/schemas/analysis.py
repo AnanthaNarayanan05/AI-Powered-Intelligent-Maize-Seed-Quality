@@ -1,6 +1,6 @@
 """Pydantic request/response schemas. Field names deliberately keep "synthetic_"
 prefixes and never introduce fields implying real-world defect certification,
-purity, or foreign-object detection — see
+purity, disease diagnosis, or foreign-object detection — see
 docs/04_FUNCTIONALITY_COVERAGE_MATRIX.md.
 
 The one segmentation-shaped field here, `SegmentationStatus`, carries no mask and
@@ -87,6 +87,73 @@ class SegmentationStatus(BaseModel):
     resolution: ResolutionSummary
 
 
+class SymptomPrediction(BaseModel):
+    """One kernel's visible condition category, or a stated refusal to assign one.
+
+    `status` is "reported" or "withheld", and `predicted_class` is null in the
+    second case -- there is no field here that a caller can read as a category
+    when the model declined to commit to one. `reason` says which of the two
+    independent gates withheld it: "class_not_validated" (the winning class has
+    too little validation support to be asserted at all) or "low_confidence"
+    (below the calibrated softmax floor).
+
+    `argmax_class_before_gate` is what the model would have said with no gate in
+    front of it. It is named that way so it cannot be mistaken for the answer,
+    and it is present on both statuses.
+
+    `is_diagnosis` is always False. These are visual grading categories recorded
+    by expert graders; no pathogen, toxin or species is identified anywhere in
+    this project, and an image-level grading label could not support such a claim.
+    """
+
+    status: str
+    reason: Optional[str] = None
+    predicted_class: Optional[str] = None
+    description: Optional[str] = None
+    confidence: Optional[float] = None
+    argmax_class_before_gate: str
+    argmax_confidence: float
+    class_probabilities: dict[str, float]
+    confidence_threshold: float
+    validated_classes: list[str]
+    is_diagnosis: bool = False
+    label_source: str
+    measured_coverage: Optional[float] = None
+    measured_accuracy: Optional[float] = None
+    caveat: str
+
+
+class VisibleSymptomStatus(BaseModel):
+    """Whether visible-symptom classification could run at all, image aside.
+
+    Reported once per analysis and reported even when nothing ran, for the same
+    reason `SegmentationStatus` is: "no model serves this task" and "the model
+    looked at every kernel and committed to none" are different facts, and a
+    reader seeing an empty column needs to know which one produced it.
+
+    `withheld_classes` publishes the silences with the reason each class earned,
+    rather than leaving them as an absence, and `calibration_optimism` travels
+    with the held-out figures so the served accuracy is never quoted without the
+    val-to-test gap beside it.
+    """
+
+    status: str
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    model: Optional[str] = None
+    classes: list[str] = []
+    class_descriptions: dict[str, str] = {}
+    validated_classes: list[str] = []
+    withheld_classes: dict[str, str] = {}
+    confidence_threshold: Optional[float] = None
+    selection_rule: Optional[str] = None
+    held_out_coverage: Optional[float] = None
+    held_out_accuracy: Optional[float] = None
+    calibration_optimism: Optional[float] = None
+    is_diagnosis: bool = False
+    note: Optional[str] = None
+
+
 class SeedAnalysisResult(BaseModel):
     seed_index: int
     bbox: list[float]
@@ -96,6 +163,7 @@ class SeedAnalysisResult(BaseModel):
     kernel_px: Optional[int] = None
     variety_prediction: Optional[VarietyPrediction] = None
     synthetic_defect_prediction: Optional[SyntheticDefectPrediction] = None
+    symptom_prediction: Optional[SymptomPrediction] = None
     similarity_results: list[SimilarityMatch] = []
 
 
@@ -105,6 +173,7 @@ class ImageAnalysisResponse(BaseModel):
     seeds: list[SeedAnalysisResult]
     warnings: list[str] = []
     segmentation: Optional[SegmentationStatus] = None
+    visible_symptom: Optional[VisibleSymptomStatus] = None
 
 
 class BatchAnalysisResponse(BaseModel):
