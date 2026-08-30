@@ -158,6 +158,12 @@ class ModelRecord:
     requires_resolution: dict | None
     label_provenance: str | None
     metrics_file: str | None  # absolute, or None if the model has no evaluation
+    # Classes the model holds but is never permitted to assert, mapped to the
+    # measured reason. Declared rather than inferred, and published rather than
+    # kept in the YAML, because a served model's silences are part of its
+    # specification: a reader shown seven classes and no note has been told the
+    # model can assert seven.
+    withheld_classes: list[str] | None = None
 
     # ---- measured (filesystem, at load time)
     present: bool = False
@@ -215,6 +221,7 @@ class ModelRecord:
             "metrics_file": self.metrics_file,
             "metrics_binding": self.metrics_binding,
             "note": self.note,
+            "withheld_classes": self.withheld_classes,
         }
 
 
@@ -309,6 +316,8 @@ def _hydrate(spec: dict, ckpt_root: Path, metrics_root: Path) -> ModelRecord:
         requires_resolution=spec.get("requires_resolution"),
         label_provenance=spec.get("label_provenance"),
         metrics_file=str(metrics_path) if metrics_path else None,
+        withheld_classes=(list(spec["withheld_classes"])
+                          if spec.get("withheld_classes") else None),
     )
 
     # A YOLO run directory counts as present only if the weights file is there.
