@@ -412,7 +412,11 @@ async function commit(kind){
   let decision=kind, mask=null;
   if(kind==='auto'){
     const n=maskPixels();
-    if(n===0){ decision='no_defect'; }
+    // Enter means "accept what is on screen". Every item loads with nothing
+    // selected and an empty canvas, so on a fast pass Enter used to file a
+    // verified 'no defect' on a kernel the reviewer never actually judged.
+    // No-defect has its own key; make it a deliberate press.
+    if(n===0){ flash('Nothing to accept. 1-9 picks a candidate, draw one by hand, 0 records no defect, X rejects the proposal.'); return; }
     else if(sel>=0) decision = painted?'corrected':'accepted';
     else decision='drawn';
   }
@@ -423,6 +427,15 @@ async function commit(kind){
       note:document.getElementById('note').value})});
   if(!r.ok){ alert('save failed: '+await r.text()); return; }
   const j=await r.json(); showProgress(j.progress); next();
+}
+
+function flash(msg){
+  let el=document.getElementById('flash');
+  if(!el){ el=document.createElement('div'); el.id='flash';
+    el.style.cssText='position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#3a2a2a;color:#ffb4a2;border:1px solid #7a4a44;border-radius:6px;padding:9px 14px;font-size:13px;z-index:99;max-width:70%';
+    document.body.appendChild(el); }
+  el.textContent=msg; el.style.display='block';
+  clearTimeout(el._t); el._t=setTimeout(()=>{el.style.display='none';},3200);
 }
 
 function showProgress(p){

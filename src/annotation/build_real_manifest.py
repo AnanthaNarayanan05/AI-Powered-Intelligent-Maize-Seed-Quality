@@ -1,4 +1,4 @@
-"""Turn human-verified review decisions into a segmentation manifest.
+"""Turn verified review decisions into a segmentation manifest.
 
     python -m src.annotation.build_real_manifest
 
@@ -10,6 +10,12 @@ WHAT MAKES A ROW TRAINING DATA. status == "verified" and a decision in
 {accepted, corrected, drawn, no_defect}. Everything else -- still "proposed", or
 "rejected" -- is dropped. A SAM proposal nobody looked at is a hypothesis, not a
 label, and this file is the only place that distinction is enforced.
+
+WHO LOOKED AT IT is a second, separate question, and it is answered from the
+reviewer column rather than from a flag: a person working in the review server, or
+a vision model reading contact sheets. Both are real review, one is not human
+verification, and the sidecar written here says which it was in terms the
+checkpoint and the metrics file repeat verbatim. See is_machine_reviewer.
 
 PER-CHANNEL VALIDITY. GrainSpace labels one condition per kernel. A reviewer who
 marks the bore holes on an AP kernel has said nothing about whether that kernel is
@@ -50,6 +56,21 @@ MASK_DECISIONS = {"accepted", "corrected", "drawn"}
 # gets forgotten on a rerun -- and the failure mode of forgetting it here is a
 # checkpoint claiming human verification it never had.
 MACHINE_REVIEWERS = {"", "auto", "model_qc", "machine"}
+
+# A vision model reading contact sheets (src/annotation/apply_sheet_decisions.py)
+# is a real annotation method and its masks are real judgements, but it is not a
+# person and must never be counted as one. Any reviewer string carrying a model
+# family name is machine review, so a future reviewer id does not have to be added
+# to a list here before the provenance comes out right.
+MODEL_REVIEWER_MARKERS = ("claude", "gpt", "gemini", "llama", "qwen", "sam",
+                          "model", "auto", "machine", "bot")
+
+
+def is_machine_reviewer(reviewer: str) -> bool:
+    r = (reviewer or "").strip().lower()
+    if r in MACHINE_REVIEWERS:
+        return True
+    return any(m in r for m in MODEL_REVIEWER_MARKERS)
 
 
 def file_digest(path: str) -> str:
@@ -171,14 +192,30 @@ def build(proposal_csv: str = PROPOSAL_CSV) -> tuple[list[dict], dict]:
 
 def provenance(rows: list[dict], report: dict) -> dict:
     """Provenance derived from the review record, not asserted by the operator."""
-    human = [r for r in rows if r["reviewer"].strip().lower() not in MACHINE_REVIEWERS]
-    all_human = bool(rows) and len(human) == len(rows)
-    kind = "sam_proposed_human_verified" if all_human else "sam_proposed_machine_screened"
-    verified_by = ("Every mask below was reviewed by a person."
-                   if all_human else
-                   f"{len(human)}/{len(rows)} rows carry a human reviewer; the rest were "
-                   "screened without human verification and MUST NOT be described as "
-                   "human-verified ground truth.")
+    human = [r for r in rows if not is_machine_reviewer(r["reviewer"])]
+    machine = [r for r in rows if is_machine_reviewer(r["reviewer"])]
+    named = sorted({r["reviewer"].strip() for r in machine if r["reviewer"].strip()})
+    if rows and not machine:
+        kind = "sam_proposed_human_verified"
+        verified_by = "Every mask below was reviewed by a person."
+    elif rows and not human:
+        kind = "sam_proposed_model_verified"
+        verified_by = (
+            "Every mask below was reviewed by " + (", ".join(named) or "a model") +
+            " reading contact sheets, not by a person. That is model-assisted "
+            "annotation: each proposal was actually inspected and judged, and the "
+            "obviously wrong ones -- rim crescents, specular highlights, sub-percent "
+            "specks, whole-body masks -- were rejected rather than accepted. But the "
+            "boundaries are the proposer's, the review resolution was a 170px panel, "
+            "and no person has checked any of it. These are MODEL-VERIFIED masks and "
+            "MUST NOT be described as human-verified ground truth, nor any metric "
+            "measured against them as real-world human-validated performance.")
+    else:
+        kind = "sam_proposed_mixed_review"
+        verified_by = (
+            f"{len(human)}/{len(rows)} rows carry a human reviewer; the remaining "
+            f"{len(machine)} were reviewed by " + (", ".join(named) or "a model") +
+            ". The set as a whole is NOT human-verified ground truth.")
     return {
         "label_provenance": kind,
         "label_note": (
@@ -192,8 +229,13 @@ def provenance(rows: list[dict], report: dict) -> dict:
             "others. Coverage derived from these masks is VISIBLE DEFECT AREA %, not a "
             "physically calibrated area."),
         "source_dataset": "GrainSpace maize M600 (val split)",
-        "annotation_tool": "src/annotation/sam_propose.py -> src/annotation/review_server.py",
+        "annotation_tool": ("src/annotation/sam_propose.py -> "
+                            "src/annotation/review_server.py (human) | "
+                            "src/annotation/review_sheets.py -> "
+                            "src/annotation/apply_sheet_decisions.py (model)"),
         "reviewers": report["reviewers"],
+        "n_human_reviewed": len(human),
+        "n_model_reviewed": len(machine),
         "n_images": report["n_kept"],
         "decision_counts": dict(Counter(r["decision"] for r in rows)),
         "split_unit": "plate id (src.annotation.splits.plate_id); no plate spans two splits",
@@ -258,6 +300,8 @@ def main() -> None:
     if prov["label_provenance"] != "sam_proposed_human_verified":
         print("\nNOTE: not every row has a human reviewer. The sidecar says so, and the "
               "checkpoint and metrics file will repeat it verbatim.")
+        print(f"      human {prov['n_human_reviewed']} / model {prov['n_model_reviewed']}"
+              f"   -> {prov['label_provenance']}")
 
 
 if __name__ == "__main__":
