@@ -241,6 +241,14 @@ SUPPORTED = [
     "neighbours, never the query",
     "Grad-CAM explainability, per head and per seed, over the post-attention "
     "feature map (an attention map, not a segmentation mask)",
+    "foreign-object flagging (not identification) — a ranked review aid on "
+    "detector crops; catches roughly 70% of impurities the detector located "
+    "at a 5% review budget, and an unflagged object is not thereby confirmed "
+    "maize",
+    "visible-symptom classification — names the visible condition category a "
+    "human grader would assign (never a diagnosis, pathogen or toxin); "
+    "categorises roughly 57% of held-out kernels and is correct on about 77% "
+    "of those, the rest withheld rather than guessed",
     "batch analysis and persistent history",
     "Gemini-powered explanation of verified model outputs",
 ]
@@ -248,11 +256,9 @@ SUPPORTED = [
 NOT_SUPPORTED = [
     "real-world fungal/insect/disease diagnosis — published kernel-level "
     "detection relies on NIR/hyperspectral bands an RGB camera cannot see",
-    "defect type classification — the quality label is binary Good/Bad",
     "defect severity scoring — the model outputs confidence, not severity",
     "pixel-level segmentation or exact defect area on real defects — the only "
     "trained segmenter learned defects this project painted",
-    "foreign-object detection — the detector has a single class, Corn",
     "certified seed-lot analysis — certification requires an accredited "
     "laboratory and a prescribed sampling protocol",
 ]
