@@ -264,3 +264,41 @@ models:
     requires_resolution:
       min_kernel_px: 24
       source: outputs/metrics/segmentation_resolution_floor.json
+
+  - key: defect_segmenter_real
+    name: Defect segmenter (real, first pass)
+    version: 0.1.0
+    architecture: EfficientNet-B0 encoder + U-Net decoder
+    task: defect_segmentation
+    serves: []
+    label_provenance: sam_proposed_mixed_review
+    role: >-
+      Trained on SAM/colour-distance masks proposed over real GrainSpace M600
+      defect images and reviewed row-by-row (60/436 rows by a person in
+      src/annotation/review_server.py, the remaining 376 by claude-opus-5
+      reading contact sheets in src/annotation/apply_sheet_decisions.py --
+      model-verified, NOT human-verified, per the sidecar). seed_body
+      segments cleanly (test IoU 0.82, Dice 0.90). cracked and
+      discolored_mold show real signal -- zero false alarms on clean
+      kernels, recall 0.62-0.96 -- but on test sets of 1 and 5 positive
+      images respectively, too small for the number to mean anything beyond
+      "not obviously broken." insect_damaged is degenerate: precision
+      ~0.0004, 100% false-alarm rate on clean kernels -- the model paints
+      almost the whole frame and must not be trusted for that channel at
+      all. Every channel is DETECTION_ONLY (outputs/metrics/defect_segmenter_real.json):
+      presence, not a calibrated area percentage. Not served pending more
+      annotated positives, particularly for insect_damaged.
+    checkpoint: defect_segmenter_real_best.pt
+    metrics: defect_segmenter_real
+    dataset: manifest_segmentation_real
+    trained_by: >-
+      python -m src.segmentation.train_seg --manifest
+      data_processed/manifest_segmentation_real.csv --out-name
+      defect_segmenter_real
+    input:
+      kind: kernel_crop
+      image_size: 224
+      colour: RGB
+    requires_resolution:
+      min_kernel_px: 24
+      source: outputs/metrics/segmentation_resolution_floor.json
