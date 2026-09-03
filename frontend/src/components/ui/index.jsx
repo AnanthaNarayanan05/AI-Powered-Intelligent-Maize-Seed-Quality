@@ -104,7 +104,13 @@ export function ProvenanceBadge({ synthetic }) {
 }
 
 /* ---------- ConfidenceBar ---------- */
+// Hidden project-wide for now: displayed confidence is uncalibrated and, for
+// some models (visible-symptom classifier), deliberately low by design. Bring
+// this back once calibration/coverage is improved -- see model_registry.yaml.
+const SHOW_CONFIDENCE = false;
+
 export function ConfidenceBar({ value, tone, label, showValue = true, delay = 0 }) {
+  if (!SHOW_CONFIDENCE) return null;
   const pct = Math.max(0, Math.min(1, value ?? 0));
   // Low confidence must look different from high confidence, not just read differently.
   const auto = pct >= 0.85 ? "ok" : pct >= 0.6 ? "warn" : "error";
