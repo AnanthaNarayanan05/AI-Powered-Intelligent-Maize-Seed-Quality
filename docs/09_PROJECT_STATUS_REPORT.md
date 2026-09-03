@@ -1,7 +1,7 @@
 # Project Status Report
 
 **Project:** AI-Powered Intelligent Maize Seed Quality, Defect, Variety Recognition and Detection System Using Contrastive Learning and Cognitive Attention
-**Report date:** August 26, 2026 (supersedes the August 24 post-training status)
+**Report date:** August 26, 2026 (supersedes the August 24 post-training status) — **updated September 4, 2026, see §10**
 **Prepared for:** Ananthu
 **Location:** `C:\COLLEGE\Project\FINALYEARPROJECT` (local RTX 4060 machine)
 
@@ -110,6 +110,10 @@ original weakness was its threshold, not its scoring function.
 - **Duplicate detections** (§6.8): Ultralytics' default NMS IoU of 0.70 produced two boxes on one kernel in 41.7% of close-ups. `nms_iou: 0.40` cuts that to 1.7% *and* lowers dense-scene count error from 1.20 to 0.72.
 - **Similarity search is visual/feature similarity, not certification** (§2).
 - **Seed-lot composition reporting** is new: variety composition, off-type rate and soundness aggregated over many analyses. It is explicitly *not* a certification, which is a legal determination made by an accredited laboratory following a prescribed sampling protocol.
+
+### 1.6 What has shipped since this report was written
+
+Everything in §§1–9 is unchanged from August 26 and is retained as the historical record. Four new served capabilities and the project's first real (non-synthetic) defect model have shipped since: foreign-object flagging, visible-symptom classification, a widened history schema for the pixel-level phases, a Gemini SDK migration, and — the largest single piece of work — a complete annotation review of 1,100 SAM/colour-distance defect proposals over real GrainSpace imagery, ending in a trained, evaluated, and registered (but not yet served) `defect_segmenter_real`. **See §10** for the full account.
 
 ---
 
@@ -599,6 +603,11 @@ Covered in full in §4.3. In brief: the quality head is accurate in-distribution
 | 8 | Consolidate to a single served model | **Done** — §6.10; one trunk, two heads, six varieties plus quality |
 | 9 | Gate quality output on distribution distance | **Done** — §4.3, §6.11; catches 100% of Dataset A |
 | 10 | Seed-lot composition reporting | **Done** — `/api/lot/report`, verified on 1,572 kernels |
+| 11 | Foreign-object flagging | **Done** — §10.1; `maize_identity_gate`, 5% review budget, 69.8% impurity recall |
+| 12 | Visible-symptom classification | **Done** — §10.2; `visible_symptom_classifier`, 56.9% coverage at 76.9% test accuracy |
+| 13 | Persist pixel-level measurements in history | **Done** — §10.3; additive schema, 169→217 tests, zero rows corrupted |
+| 14 | Migrate off the retired Gemini SDK | **Done** — §10.4; `google-genai`, ground rules verified live |
+| 15 | Annotate and train a real (non-synthetic) defect segmenter | **Done, not served** — §10.5; `defect_segmenter_real`, `seed_body` IoU 0.82, three defect channels too small or too degenerate to serve |
 
 ### Optional future work (genuinely out of scope, not omissions)
 
@@ -610,7 +619,9 @@ Ordered by value:
 - **Improve SanzalSima recall** (§6.10). At 60.6%, it is the weakest measured behaviour in the served model, and it is a genuine visual confusion with WangDataa rather than an artefact.
 - **Acquire more source seeds for Dataset B.** 127 physical seeds behind 17,713 files is the binding constraint on statistical power; no augmentation or splitting strategy can manufacture independent observations the data does not contain.
 - **Validate the quality head outside its current distribution.** It is measured only against Mendeley-style kernel close-ups. Extending it to Dataset A/B imagery requires quality labels for those datasets, which do not exist.
-- **Capabilities requiring data this project does not hold:** pixel-level defect segmentation (needs masks), defect severity scoring (needs ordinal labels or defect area), foreign-object identification (needs non-kernel detection classes), and fungal/insect/disease diagnosis (the literature relies on NIR/hyperspectral bands at 715 nm and 965 nm that an RGB camera cannot observe). Each is listed as unsupported in the UI rather than approximated.
+- **Grow the annotated-positive pool for real defect segmentation, `insect_damaged` first** (§10.5). This is no longer blocked on masks not existing — 436 real rows are annotated and a first checkpoint trains and evaluates cleanly on `seed_body`. It is blocked on volume: `insect_damaged` has 1–2 positive images per split, which is why it is degenerate rather than merely weak.
+- **Calibrate confidence before re-enabling the confidence bars** (§10.6) — either temperature-scale the unified model's softmax, or accept the coverage/accuracy trade the symptom classifier already measures, and reflect the choice in the UI rather than hiding the number.
+- **Capabilities still requiring data this project does not hold:** defect severity scoring (needs ordinal labels or a calibrated defect-area percentage, and every current channel is measured `DETECTION_ONLY`), foreign-object *identification* (the Phase 4 gate flags, it does not name a material — no stone/husk/debris labels exist), and fungal/insect/disease *diagnosis* (the literature relies on NIR/hyperspectral bands at 715 nm and 965 nm that an RGB camera cannot observe; the Phase 5 symptom classifier names a grader's visual category, never a pathogen). Each is listed as unsupported in the UI rather than approximated.
 
 ---
 
@@ -652,4 +663,76 @@ Ordered by value:
 
 ---
 
-*This report reflects the actual, verified state of the project as of the date above. No capability listed as "done" here has been claimed without a corresponding test run, and no accuracy figure has been reported without the checkpoint and metrics file that produced it.*
+## 10. Update — September 4, 2026
+
+Everything in §§1–9 is the report as originally written and is left untouched above. This section covers what shipped in the nine days since: four phases (4, 5, 9, 18) and the annotation-and-training work referred to throughout this project's commit history as Track A. `pytest tests/` now reports **217 passed, 0 failed**, up from the 40 quoted in §1 — the remainder of that growth is regression coverage added alongside each phase below, not a change to any existing test.
+
+### 10.1 Foreign-object flagging gate (Phase 4)
+
+A new gate scores each detected crop by kNN cosine distance to a maize-wide reference bank of detector crops, and calls the result *possible foreign object* or *known maize* — never a material name, because this project holds no labels for stone, husk, cob fragments or debris. Three findings shaped what shipped, each lowering the headline number rather than flattering it:
+
+- **Calibration domain.** A reference built from whole-dataset crops shifted distances 18× against the detector crops the gate actually sees at serve time, which put the flag rate at 80.2% on ordinary maize against a claimed 2% budget. The reference is now built in the serving domain — detector crops, the same transform used at inference.
+- **Crop size confound.** R² = 0.243 of the raw distance was explained by crop short side alone — a smaller crop scored more foreign regardless of what it was. The correction (§8 of `Pipeline Mathematics`, quadratic in log-crop-size) is fitted on held-out calibration crops only, and the gate declines below a measured 21px floor rather than extrapolate a fit it has no evidence for.
+- **Dense scenes.** No reference or calibration image carries more than 16 detected objects. A real 300-object upload — a packed bed of ordinary maize — had 42% of its objects surfaced, because in a packed scene every crop is filled with fragments of its neighbours. Above the 16-object limit the gate now returns *unavailable* rather than a number it cannot stand behind.
+
+Measured at the shipped 5% review budget: threshold +0.1422, gate recall 0.698 on GrainSet impurities, YOLO's own detection ceiling 0.7417 on the same set (so end-to-end recall is 0.5177), enrichment 9.29×. **Most foreign objects are still missed, and the absence of a flag is not evidence of purity** — both statements ship in the served caveat, not just in this document. Calibration data is GrainSet (Zhao et al., *Sci Data* 10:748, 2023, CC BY 4.0), 3,600 of 38,020 members fetched selectively by byte range (493 MB rather than 6.04 GB). No new model was trained — the gate reuses the existing unified encoder. Registered as `maize_identity_gate` v2.0.0.
+
+### 10.2 Visible-symptom classifier (Phase 5)
+
+Names a visible condition category — or says why it declined to — on the only real labels this project can honestly obtain: 1,260 GrainSpace M600 kernel crops carrying expert-grader condition categories (AP, BN, FM, HD, MY, NOR, SD). No maize leaf-disease dataset stands in for kernel imagery, and no label is propagated or synthesised; that 1,260 is a ceiling, since GrainSpace's train half is organised by cultivar and carries no condition annotation at all. Every payload carries `is_diagnosis: false` as a field, not just a caveat in prose — FM is the grader category "fusarium & mildew," and naming it is not a fusarium finding.
+
+Three training routes were measured before choosing how to serve it:
+
+| route | test macro-F1 | cost to the other tasks in the same trunk |
+|---|---|---|
+| frozen-trunk head | 0.2605 | none (trunk untouched) |
+| joint fine-tune | 0.2343 | quality −0.0096 F1 |
+| specialised full fine-tune | **0.5865** | variety 0.9316→0.5048, quality 0.9721→0.5800 |
+
+The specialised weights are the only usable ones, but they measurably wreck the trunk's other two tasks — so they ship as their own checkpoint, and `unified_seed_model_best.pt` is untouched (verified bit-identical before the symptom work began). A two-part abstention gate sits in front of it: only 5 of 7 classes are validated (HD has 9 validation crops, SD has 2 — both below the support at which an operating point means anything, so a win there is withheld rather than reported), and a 0.55 softmax floor withholds the rest, chosen as the smallest floor whose validation accuracy over retained predictions reaches 0.85. Gated, it names a category for **56.9% of held-out kernels and is right on 76.9% of those** — validation ran 8.96 points optimistic against test, and that gap travels alongside the accuracy everywhere it is reported, not just here.
+
+The serving domain was checked, not assumed: these labels come from GrainSpace crops, but the platform is fed YOLO crops from real uploads — a different domain. Measured over 633 kernels from 35 readable real uploads: 0.712 coverage, 449 of 451 named verdicts were NOR, 124 withheld for confidence and 58 for an unvalidated class. Accuracy there is deliberately reported as null — those uploads carry no visible-condition ground truth, so it cannot be computed and is not estimated. A withheld kernel is stored as `symptom_class = NULL`, with the would-have-been answer kept separately as `symptom_argmax_class` under a name that cannot be mistaken for the verdict, and the UI renders a refusal in its own visual language with no confidence bar — a percentage there would be the confidence of a prediction that was never made.
+
+### 10.3 History schema widened for the pixel-level phases (Phase 9)
+
+History previously stored a box, a label and some neighbours; everything the pipeline already computed about resolution and segmentation was thrown away on write. The schema now has somewhere for it to live, on two rules that matter more than the columns themselves: a seed with **no** segmentation row was never put to a segmenter, while a row saying **unavailable** was, and carries why — those are different claims and the schema no longer conflates them. Phase 2/3/4 columns stay `NULL` rather than `0`, because a zero reads as *measured, no defect found*, a different claim from *not measured*. Masks are stored as a path plus the sha256 of the file at that path, never as bytes — the same scheme the model registry already uses for checkpoints. Migration is additive and nullable only; verified against the real database (151 analyses, 2,884 detections, 5,704 classifications, 2,884 similarity results, 34 batches) with every old row reading back as *unknown* rather than a default that looks like a finding.
+
+### 10.4 Gemini SDK migration (Phase 18)
+
+`google-generativeai` is retired; its replacement, `google-genai`, is not a drop-in rename. Timeouts are milliseconds now, not seconds — carrying the old number across unchanged would have turned a 20-second budget into 20 milliseconds, measured both directions to confirm (`timeout=2` aborts in 0.26s, `timeout=30000` returns in 12.53s). The system instruction — `LIMITATION_CONTEXT`, the only thing stopping Gemini from claiming a defect area, a segmentation, a severity, or a pathogen diagnosis — now attaches per request rather than to a reused model object, verified live by asking point-blank for a defect area in mm² and a named fungal pathogen: both correctly refused. The automatic function-calling loop the new SDK runs by default is explicitly switched off, since this module passes it no tools.
+
+Verifying the failure path surfaced two pre-existing frontend bugs, fixed in the same commit because they sit inside this phase's own contract: `/copilot` rendered a blank page (two hooks used without being imported), and nothing in the UI read `ai_available` or `fallback_reason` — every call site replaced a server-side outage with "No response returned." under a caption still claiming an AI-generated explanation, so an outage looked like the model having nothing to say.
+
+### 10.5 Track A: the annotation review is complete, and the first real defect segmenter is trained
+
+This is the largest single piece of work since August 26. All three real defect classes (`cracked`, `discolored_mold`, `insect_damaged`) previously had zero real (non-synthetic) annotations — every mask up to this point was painted by `synthetic_defect_generator.py`. Track A closes that gap by hand-reviewing SAM ViT-B + colour-distance mask proposals over real GrainSpace M600 defect-channel imagery, contact sheet by contact sheet, against a fixed set of rejection precedents (rim/specular bleed, off-body shadow misread as an on-body streak, the normal bicolor crown/germ pattern, degenerate whole-body proposals) so the same visual judgment is applied consistently across all 1,100 rows.
+
+```
+proposals.csv: 1,100 rows, all decided
+  664 rejected  (no candidate cleanly isolated the true defect, or none was visible)
+  400 no_defect (NOR-class rows with zero proposal candidates, by the dataset's own design)
+   36 accepted  (candidate mask judged to cleanly bound a genuine, visible defect)
+  ---
+  436 verified  ->  data_processed/manifest_segmentation_real.csv  (322 / 58 / 56 train/val/test)
+```
+
+60 of the 436 verified rows carry a human reviewer through `review_server.py`; the remaining 376 were reviewed by `claude-opus-5` reading rendered contact sheets through `apply_sheet_decisions.py` — a script that hard-refuses `--reviewer human`, so the two paths cannot be confused after the fact. Split by GrainSpace plate id, never by image, so no plate straddles train/val/test. The resulting label provenance, `sam_proposed_mixed_review`, is stamped into the manifest's sidecar and is **not human-verified ground truth**; every downstream artefact says so.
+
+An EfficientNet-B0 + U-Net decoder, warm-started from the same contrastive encoder used elsewhere in this project, trains on this manifest with a capped inverse-frequency BCE term (cap 25.0 — `cracked`'s true weight is ≈3,300 and would destabilise training uncapped) plus soft Dice, masked per (image, channel) so an unannotated channel contributes no gradient:
+
+| channel | test IoU | test Dice | precision | recall | false-alarm rate on clean | verdict |
+|---|---|---|---|---|---|---|
+| `seed_body` | **0.82** | **0.90** | 0.95 | 0.85 | 0.000 | segments cleanly |
+| `cracked` | 0.24 | 0.38 | 0.24 | 0.96 | 0.000 | real signal, 1 positive test image — too small to trust |
+| `discolored_mold` | 0.28 | 0.43 | 0.33 | 0.62 | 0.000 | real signal, 5 positive test images — too small to trust |
+| `insect_damaged` | 0.0004 | 0.0009 | 0.0004 | 1.00 | **1.000** | degenerate — paints almost the whole frame |
+
+Every channel is reported `DETECTION_ONLY` — presence, not a calibrated area percentage — and thresholds were tuned on validation only, then frozen and applied once to test. `defect_segmenter_real` is registered in `configs/model_registry.yaml` with **`serves: []`**, the same convention used for `defect_segmenter_synthetic`: trained, evaluated, and honestly described, but not placed in front of a user until `insect_damaged` in particular has enough annotated positives to mean something. This is the first time real (not painted) defect masks exist anywhere in this project, and it directly retires the "pixel-level defect segmentation (needs masks)" line that appeared in this report's punch list before today — the masks now exist; what remains is volume, concentrated in one channel.
+
+### 10.6 Frontend: confidence bars hidden pending calibration
+
+The unified model's displayed confidence is raw, uncalibrated softmax — no temperature scaling has ever been fitted — and separability between the three GrainSpace-derived varieties (SanzalSima test F1 0.74 despite having *more* training images than the classes that score 1.00) means the number legitimately reads low even when the prediction is right. The symptom classifier's confidence is low by explicit design (§10.2 — a 0.55 floor that already trades accuracy for coverage on purpose). Rather than show a number that is either miscalibrated or intentionally conservative without comment, every `ConfidenceBar` in the frontend (Analyze, Batch, Compare, Copilot, History) is hidden behind a single `SHOW_CONFIDENCE` flag in `frontend/src/components/ui/index.jsx`, to be re-enabled once one of the two fixes in this report's punch list actually lands.
+
+---
+
+*This report reflects the actual, verified state of the project as of August 26, 2026 in §§1–9 and September 4, 2026 in §10. No capability listed as "done" here has been claimed without a corresponding test run, and no accuracy figure has been reported without the checkpoint and metrics file that produced it.*
