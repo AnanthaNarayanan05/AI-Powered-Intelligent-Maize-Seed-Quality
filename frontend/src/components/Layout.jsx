@@ -80,9 +80,10 @@ export default function Layout() {
       {/* The real golden-hour field is the Overview page's background, not a boxed
          hero element — it plays fixed and full-bleed behind the glass shell, with
          a dark overlay + vignette layered over it for text contrast. Every other
-         page keeps the plain obsidian/radial-gradient treatment (see bg-field
-         rules in index.css). A missing/failed video falls back to the same still
-         poster + gradient the rest of the app already uses. */}
+         page gets the same treatment over the static Background.png instead (see
+         bg-field rules in index.css) — one visual language, two source images. A
+         missing/failed video falls back to the same still poster the app already
+         uses for its first paint. */}
       <div className={`bg-field ${isOverview ? "bg-field--video" : ""}`} aria-hidden="true">
         {isOverview && !videoFailed && (
           <video

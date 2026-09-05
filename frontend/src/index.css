@@ -31,33 +31,33 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* ---------- cinematic background: obsidian + two faint radials + grid ----------
-   Fixed and non-interactive so it never intercepts clicks or forces reflow.     */
+/* ---------- shared field: real background photo, every page but Overview ----------
+   Fixed and non-interactive so it never intercepts clicks or forces reflow. Same
+   stack as the Overview video below it (image -> dark overlay -> vignette) so both
+   read as one design language rather than two unrelated treatments. */
 .bg-field {
   position: fixed;
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  background:
-    radial-gradient(900px 600px at 78% 8%, rgba(244, 197, 66, 0.055), transparent 60%),
-    radial-gradient(1100px 700px at 12% 88%, rgba(111, 191, 115, 0.045), transparent 62%),
-    var(--bg-base);
+  background: var(--bg-base);
+  background-image: url("/Background.png");
+  background-size: cover;
+  background-position: center;
 }
 
 .bg-field::after {
   content: "";
   position: absolute;
   inset: 0;
-  background-image:
-    linear-gradient(rgba(245, 242, 232, 0.022) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(245, 242, 232, 0.022) 1px, transparent 1px);
-  background-size: 64px 64px;
-  mask-image: radial-gradient(ellipse 120% 90% at 50% 40%, #000 35%, transparent 78%);
-  -webkit-mask-image: radial-gradient(ellipse 120% 90% at 50% 40%, #000 35%, transparent 78%);
+  background:
+    linear-gradient(180deg, rgba(6, 10, 8, 0.55) 0%, rgba(6, 10, 8, 0.34) 42%, rgba(6, 10, 8, 0.64) 100%),
+    radial-gradient(ellipse 120% 90% at 50% 38%, transparent 42%, rgba(4, 6, 5, 0.55) 100%);
 }
 
-/* ---------- Overview only: real video replaces the radial/grid treatment ----------
-   Same stacking slot, same fixed/non-interactive behaviour — just a different fill.
+/* ---------- Overview only: the real field, moving ----------
+   Same stacking slot, same fixed/non-interactive behaviour, same overlay recipe as
+   the shared field above — just a video where the others carry a still.
    Stack, back to front: video -> dark overlay -> vignette -> glass shell (in Layout). */
 .bg-field--video {
   background: var(--bg-base);
