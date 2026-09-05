@@ -68,7 +68,11 @@ function Side({ analysis, label }) {
         </div>
         {d ? (
           <>
-            <strong className="cmp__val cmp__val--warn">{pretty(d.predicted_class)}</strong>
+            <strong
+              className={`cmp__val ${/^(bad|defect)/i.test(d.predicted_class) ? "cmp__val--warn" : ""}`}
+            >
+              {pretty(d.predicted_class)}
+            </strong>
             <ConfidenceBar value={d.confidence} showValue label={null} />
           </>
         ) : (
@@ -196,7 +200,7 @@ export default function Compare() {
 
       {state === "ready" && analyses.length >= 2 && (
         <>
-          <GlassCard className="cmp__pickers">
+          <GlassCard tier="floating" className="cmp__pickers">
             <label className="cmp__picker">
               <span>Analysis A</span>
               <select value={idA || ""} onChange={(e) => setIdA(e.target.value)}>
@@ -250,7 +254,7 @@ export default function Compare() {
             </div>
           </GlassCard>
 
-          <GlassCard accent="cyan">
+          <GlassCard accent="cyan" tier="primary">
             <SectionHeader
               title="AI comparison"
               subtitle="Gemini interprets the two verified results above."

@@ -1,13 +1,34 @@
-/* ---------- GlassCard ---------- */
+/* ---------- GlassCard ----------
+   Three tiers, same recipe (translucent dark + blur + thin border + soft
+   shadow), scaled by how much visual weight the surface should carry:
+   secondary (default) for cards, primary for major panels, floating for
+   layered-above-content surfaces. All must let the page background show
+   through — never raise the alpha high enough to read as opaque. */
 .glass-card {
   position: relative;
   background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur)) saturate(120%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(120%);
   border: 1px solid var(--glass-border);
   border-radius: var(--r-lg);
   padding: var(--sp-5);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.glass-card--primary {
+  background: var(--glass-bg-primary);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(130%);
+  border-color: var(--glass-border-strong);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.glass-card--floating {
+  background: var(--glass-bg-floating);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(135%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(135%);
+  border-color: var(--glass-border-strong);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
 /* Only transform/opacity/border animate — no layout properties. */

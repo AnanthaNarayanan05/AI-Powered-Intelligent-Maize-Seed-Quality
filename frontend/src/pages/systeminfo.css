@@ -109,7 +109,8 @@
   color: var(--ink);
   font-size: var(--text-xs);
   font-weight: 600;
-  white-space: nowrap;
+  text-align: right;
+  justify-content: flex-end;
 }
 
 /* ---------- capability lists ---------- */

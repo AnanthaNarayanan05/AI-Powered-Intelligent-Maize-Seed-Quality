@@ -14,10 +14,11 @@
   width: var(--sidebar-w);
   display: flex;
   flex-direction: column;
-  background: rgba(12, 16, 14, 0.82);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border-right: 1px solid var(--glass-border);
+  background: var(--glass-bg-primary);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(130%);
+  border-right: 1px solid var(--glass-border-strong);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.03);
   z-index: 40;
 }
 
@@ -140,10 +141,10 @@
   align-items: center;
   gap: var(--sp-4);
   padding: var(--sp-3) var(--sp-6);
-  background: rgba(8, 11, 10, 0.72);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-bg-primary);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(130%);
+  border-bottom: 1px solid var(--glass-border-strong);
 }
 .topbar__menu {
   display: none;
@@ -164,10 +165,16 @@
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .topbar__desc {
   font-size: 0.72rem;
   color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .topbar__status {
   margin-left: auto;

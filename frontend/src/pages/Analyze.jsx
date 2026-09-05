@@ -336,7 +336,7 @@ export default function Analyze() {
 
       <div className="an__top">
         {/* ---------- upload ---------- */}
-        <GlassCard className="an__upload">
+        <GlassCard tier="primary" className="an__upload">
           <h3 className="an__cardtitle">Upload image</h3>
           <UploadZone
             files={files}
@@ -376,7 +376,7 @@ export default function Analyze() {
         </GlassCard>
 
         {/* ---------- pipeline / summary ---------- */}
-        <GlassCard className="an__pipeline">
+        <GlassCard tier="primary" className="an__pipeline">
           <h3 className="an__cardtitle">Analysis pipeline</h3>
           {status === "idle" && (
             <EmptyState
@@ -456,7 +456,7 @@ export default function Analyze() {
 
               <div className="an__grid">
                 {/* image + boxes */}
-                <GlassCard className="an__viewer">
+                <GlassCard tier="primary" className="an__viewer">
                   <SectionHeader
                     title="Detection"
                     subtitle="Click a box to inspect that seed."
@@ -677,7 +677,7 @@ export default function Analyze() {
               </div>
 
               {/* explainability */}
-              <GlassCard accent="cyan">
+              <GlassCard accent="cyan" tier="primary">
                 <SectionHeader
                   title="Explainability"
                   subtitle="Model attention visualization for the selected seed — this is not a segmentation mask and does not measure defect area."
@@ -812,7 +812,7 @@ export default function Analyze() {
               )}
 
               {/* AI explanation */}
-              <GlassCard accent="cyan">
+              <GlassCard accent="cyan" tier="primary">
                 <SectionHeader
                   title="AI interpretation"
                   subtitle="Gemini explains the verified model output above. It never produces predictions itself."

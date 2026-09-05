@@ -5,26 +5,18 @@
 }
 
 /* ---------- hero ---------- */
+/* The real field video lives behind the whole shell (Layout.jsx's bg-field), so
+   this section is just breathing room for the copy card to float in — no boxed
+   media element of its own. */
 .hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  display: flex;
   align-items: center;
-  gap: var(--sp-6);
-  min-height: 380px;
-  /* Contain the WebGL hero: without a stacking context of its own, the canvas
-     layer could leave sibling copy unpainted even though it had correct layout,
-     styles and hit-testing. */
-  isolation: isolate;
+  min-height: 400px;
+  padding: var(--sp-6) 0;
 }
 
-/* The hero copy is promoted to its own compositing layer and stacked above the
-   canvas. This is the fix for the title/lede/buttons rendering blank on the
-   Overview page while every other page was fine -- the Overview is the only page
-   carrying a WebGL context. */
 .hero__copy {
-  position: relative;
-  z-index: 2;
-  transform: translateZ(0);
+  max-width: 640px;
 }
 
 .hero__title {
@@ -58,32 +50,6 @@
   display: flex;
   gap: var(--sp-3);
   flex-wrap: wrap;
-}
-
-.hero__visual {
-  position: relative;
-  z-index: 0;
-  height: 400px;
-  min-width: 0;
-  /* Stop the canvas layer from influencing anything outside its own box. */
-  overflow: hidden;
-  contain: paint;
-}
-
-.seed-hero {
-  position: absolute;
-  inset: 0;
-}
-.seed-hero canvas {
-  display: block;
-}
-
-/* Static fallback for reduced-motion / lazy-load: same palette, no WebGL. */
-.seed-hero--static {
-  background:
-    radial-gradient(circle at 50% 46%, rgba(244, 197, 66, 0.4) 0%, rgba(244, 197, 66, 0.1) 22%, transparent 52%),
-    radial-gradient(circle at 50% 50%, rgba(72, 214, 198, 0.07) 0%, transparent 62%);
-  border-radius: var(--r-xl);
 }
 
 /* ---------- status strip ---------- */
@@ -178,76 +144,138 @@
   font-size: var(--text-sm);
   color: var(--cyan);
 }
-.distlist {
+
+/* ---------- recent analyses + quick actions ---------- */
+.dash__bottom {
+  display: grid;
+  grid-template-columns: 1.7fr 1fr;
+  gap: var(--sp-4);
+  align-items: start;
+}
+
+.dash__recentlist {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
 }
-.distrow {
+.dash__recentrow {
   display: grid;
-  grid-template-columns: minmax(120px, 200px) 1fr auto;
+  grid-template-columns: 1.4fr 0.8fr 1fr auto auto;
   align-items: center;
   gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--glass-border);
+  background: var(--bg-1);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
-.distrow__name {
+.dash__recentrow:hover {
+  border-color: var(--glass-border-strong);
+  background: rgba(244, 197, 66, 0.05);
+}
+.dash__recentname {
   font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.dash__recentmeta {
+  font-size: var(--text-xs);
   color: var(--ink-muted);
+}
+.dash__recentvariety {
+  font-size: var(--text-xs);
+  color: var(--gold);
   text-transform: capitalize;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.distrow__bar {
-  height: 7px;
-  background: rgba(245, 242, 232, 0.06);
-  border-radius: var(--r-full);
-  overflow: hidden;
+.dash__recenttime {
+  font-size: 0.68rem;
+  white-space: nowrap;
 }
-.distrow__fill {
-  display: block;
-  height: 100%;
-  border-radius: var(--r-full);
-  background: linear-gradient(90deg, var(--gold-dim), var(--gold));
+
+.dash__quickgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
 }
-.distrow__n {
-  font-size: var(--text-sm);
-  font-weight: 700;
+.dash__quick {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--glass-border);
+  background: var(--bg-1);
   color: var(--ink);
-  min-width: 34px;
-  text-align: right;
+  text-decoration: none;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.dash__quick:hover {
+  border-color: rgba(244, 197, 66, 0.35);
+  transform: translateY(-1px);
+}
+.dash__quick svg {
+  color: var(--gold);
+}
+
+@media (max-width: 900px) {
+  .dash__bottom {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .dash__recentrow {
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "name badge" "meta variety" "time time";
+    row-gap: 4px;
+  }
+  .dash__recentname {
+    grid-area: name;
+  }
+  .dash__recentrow > .badge {
+    grid-area: badge;
+  }
+  .dash__recentmeta {
+    grid-area: meta;
+  }
+  .dash__recentvariety {
+    grid-area: variety;
+  }
+  .dash__recenttime {
+    grid-area: time;
+  }
 }
 
 /* ---------- responsive ---------- */
 @media (max-width: 1040px) {
-  .hero {
-    grid-template-columns: 1fr;
-    text-align: left;
-  }
-  .hero__visual {
-    height: 220px;
-    /* The headline leads, not the decoration. Ordering the 3D seed first pushed
-       the title below the fold on narrow screens, so the page opened on an
-       ornament and a blank region. */
-    order: 1;
-  }
   .hero__title {
     font-size: 3rem;
   }
 }
 
 @media (max-width: 620px) {
+  .hero {
+    min-height: 260px;
+    padding: var(--sp-5) 0;
+  }
   .hero__title {
     font-size: 2.4rem;
   }
   .hero__lede {
     font-size: var(--text-base);
-  }
-  .distrow {
-    grid-template-columns: 1fr auto;
-  }
-  .distrow__bar {
-    grid-column: 1 / -1;
-    order: 3;
   }
 }
 

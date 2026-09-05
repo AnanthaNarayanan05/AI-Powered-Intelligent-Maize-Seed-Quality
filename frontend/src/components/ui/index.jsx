@@ -6,13 +6,15 @@ import { motion } from "framer-motion";
 import { AlertTriangle, Inbox, Loader2 } from "lucide-react";
 import "./ui.css";
 
-/* ---------- GlassCard ---------- */
-export function GlassCard({ children, className = "", accent, hover = false, ...rest }) {
+/* ---------- GlassCard ----------
+   tier: "secondary" (default, cards) | "primary" (major panels) | "floating"
+   (dropdowns/tooltips/modals) — see ui.css for the visual recipe each maps to. */
+export function GlassCard({ children, className = "", accent, tier, hover = false, ...rest }) {
   return (
     <div
       className={`glass-card ${hover ? "glass-card--hover" : ""} ${
         accent ? `glass-card--${accent}` : ""
-      } ${className}`}
+      } ${tier && tier !== "secondary" ? `glass-card--${tier}` : ""} ${className}`}
       {...rest}
     >
       {children}

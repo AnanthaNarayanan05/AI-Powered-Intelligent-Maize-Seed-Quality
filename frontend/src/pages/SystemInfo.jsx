@@ -153,7 +153,7 @@ export default function SystemInfo() {
 
       <div className="si__cols">
         {/* ---------- model stack ---------- */}
-        <GlassCard>
+        <GlassCard tier="primary">
           <SectionHeader
             title="Model stack"
             subtitle="Declared in the model registry; status, fingerprints and metrics are probed on this machine at request time."
@@ -193,7 +193,7 @@ export default function SystemInfo() {
 
         <div className="si__side">
           {/* ---------- live status ---------- */}
-          <GlassCard>
+          <GlassCard tier="floating">
             <SectionHeader title="System status" level={3} />
             {state === "loading" ? (
               <div className="si__skel">

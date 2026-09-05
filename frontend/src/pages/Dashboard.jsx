@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -11,13 +11,43 @@ import {
   Leaf,
   Activity,
   Brain,
+  Sparkles,
+  History as HistoryIcon,
 } from "lucide-react";
 import { api } from "../api/client";
-import { Button, GlassCard, MetricCard, Page, SectionHeader, StatusPill } from "../components/ui";
+import { isVarietyRow } from "../lib/seedHealth";
+import {
+  Badge,
+  Button,
+  GlassCard,
+  MetricCard,
+  Page,
+  SectionHeader,
+  Skeleton,
+  StatusPill,
+} from "../components/ui";
+import { DonutChart } from "../components/Charts";
 import "./dashboard.css";
 
-// The 3D scene is the heaviest thing in the bundle — keep it out of the initial chunk.
-const SeedHero = lazy(() => import("../components/SeedHero"));
+const pretty = (s) => (s ? s.replace(/_/g, " ") : "—");
+
+function timeAgo(iso) {
+  if (!iso) return "—";
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min${mins === 1 ? "" : "s"} ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+const QUICK_ACTIONS = [
+  { to: "/analyze", label: "Analyze seeds", icon: ScanSearch },
+  { to: "/batch", label: "Batch analysis", icon: Layers3 },
+  { to: "/copilot", label: "Ask Copilot", icon: Sparkles },
+  { to: "/history", label: "View history", icon: HistoryIcon },
+];
 
 const MODULES = [
   {
@@ -76,6 +106,8 @@ export default function Dashboard() {
   const [scale, setScale] = useState(null);
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [recent, setRecent] = useState([]);
+  const [recentState, setRecentState] = useState("loading");
 
   useEffect(() => {
     let cancelled = false;
@@ -91,6 +123,21 @@ export default function Dashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .history(5, 0)
+      .then((d) => {
+        if (cancelled) return;
+        setRecent(d.analyses || []);
+        setRecentState("ready");
+      })
+      .catch(() => !cancelled && setRecentState("error"));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const modelStatus = Object.fromEntries((info?.models || []).map((m) => [m.key, m]));
   const hasData = stats?.has_data;
   const fmt = (n) => (n == null ? "—" : n.toLocaleString());
@@ -98,8 +145,12 @@ export default function Dashboard() {
   return (
     <Page className="dash">
       {/* ---------------- hero ---------------- */}
+      {/* The real field video is the page's own background now (see Layout.jsx /
+         bg-field--video) — it plays fixed and full-bleed behind the whole shell,
+         not just this section. The copy card floats over it as translucent glass,
+         letting the field show through rather than blocking it. */}
       <section className="hero">
-        <div className="hero__copy">
+        <GlassCard tier="primary" className="hero__copy">
           <motion.h1
             className="hero__title"
             initial={{ opacity: 0, y: 14 }}
@@ -129,17 +180,11 @@ export default function Dashboard() {
             <Button size="lg" icon={ScanSearch} onClick={() => navigate("/analyze")}>
               Analyze seeds
             </Button>
-            <Button size="lg" variant="secondary" onClick={() => navigate("/history")}>
-              View history
+            <Button size="lg" variant="secondary" onClick={() => navigate("/batch")}>
+              Batch analysis
             </Button>
           </motion.div>
-        </div>
-
-        <div className="hero__visual">
-          <Suspense fallback={<div className="seed-hero seed-hero--static" aria-hidden="true" />}>
-            <SeedHero />
-          </Suspense>
-        </div>
+        </GlassCard>
       </section>
 
       {/* ---------------- live system strip ---------------- */}
@@ -298,28 +343,73 @@ export default function Dashboard() {
             }
           />
           <GlassCard>
-            <div className="distlist">
-              {Object.entries(stats.variety_distribution).map(([name, n], i) => {
-                const total = Object.values(stats.variety_distribution).reduce((a, b) => a + b, 0);
-                return (
-                  <div className="distrow" key={name}>
-                    <span className="distrow__name">{name.replace(/_/g, " ")}</span>
-                    <div className="distrow__bar">
-                      <motion.span
-                        className="distrow__fill"
-                        initial={{ width: 0 }}
-                        animate={{ width: `${(n / total) * 100}%` }}
-                        transition={{ duration: 0.7, delay: 0.06 * i, ease: [0.22, 1, 0.36, 1] }}
-                      />
-                    </div>
-                    <span className="distrow__n mono">{n}</span>
-                  </div>
-                );
-              })}
-            </div>
+            <DonutChart data={stats.variety_distribution} />
           </GlassCard>
         </section>
       )}
+
+      {/* ---------------- recent analyses + quick actions ---------------- */}
+      <section className="dash__bottom">
+        <GlassCard>
+          <SectionHeader
+            title="Recent analyses"
+            subtitle="The latest results saved to history."
+            level={3}
+            right={
+              <Link to="/history" className="dash__link">
+                View all <ArrowRight size={14} />
+              </Link>
+            }
+          />
+
+          {recentState === "loading" && (
+            <div className="dash__recentlist">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} height="42px" radius="var(--r-md)" />
+              ))}
+            </div>
+          )}
+
+          {recentState === "error" && <p className="muted">Recent analyses are unavailable right now.</p>}
+
+          {recentState === "ready" && recent.length === 0 && (
+            <p className="muted">No analyses yet — run one from Analyze and it will show up here.</p>
+          )}
+
+          {recentState === "ready" && recent.length > 0 && (
+            <div className="dash__recentlist">
+              {recent.map((r) => {
+                const top = (r.classifications || []).find(isVarietyRow);
+                return (
+                  <Link to="/history" key={r.analysis_id} className="dash__recentrow">
+                    <span className="dash__recentname" title={r.image_filename}>
+                      {r.image_filename || r.analysis_id.slice(0, 8)}
+                    </span>
+                    <span className="dash__recentmeta mono">
+                      {r.seed_count} seed{r.seed_count === 1 ? "" : "s"}
+                    </span>
+                    <span className="dash__recentvariety">{top ? pretty(top.predicted_class) : "—"}</span>
+                    <Badge tone={r.status === "completed" ? "ok" : "warn"}>{r.status}</Badge>
+                    <span className="dash__recenttime mono faint">{timeAgo(r.created_at)}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </GlassCard>
+
+        <GlassCard>
+          <SectionHeader title="Quick actions" level={3} />
+          <div className="dash__quickgrid">
+            {QUICK_ACTIONS.map(({ to, label, icon: Icon }) => (
+              <Link key={to} to={to} className="dash__quick">
+                <Icon size={18} aria-hidden="true" />
+                <span>{label}</span>
+              </Link>
+            ))}
+          </div>
+        </GlassCard>
+      </section>
     </Page>
   );
 }

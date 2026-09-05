@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api/client";
+import { usePrefersReducedMotion } from "../hooks/usePrefersReducedMotion";
 import { StatusPill } from "./ui";
 import "./layout.css";
 
@@ -32,6 +33,10 @@ export default function Layout() {
   const location = useLocation();
   const [health, setHealth] = useState({ state: "loading" });
   const [navOpen, setNavOpen] = useState(false);
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const [videoFailed, setVideoFailed] = useState(false);
+  const videoRef = useRef(null);
+  const isOverview = location.pathname === "/";
 
   useEffect(() => {
     let cancelled = false;
@@ -47,6 +52,23 @@ export default function Layout() {
   // Close the mobile drawer on navigation, otherwise it covers the new page.
   useEffect(() => setNavOpen(false), [location.pathname]);
 
+  // The Overview background video mounts only on "/", so this re-runs each time
+  // it (re)appears. autoplay alone is unreliable across browsers/policies; retry
+  // play() explicitly, then once more on the first interaction anywhere as a
+  // last-resort fallback for a stricter autoplay policy.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || videoFailed || !isOverview) return;
+    if (prefersReducedMotion) {
+      v.pause();
+      return;
+    }
+    const tryPlay = () => v.play().catch(() => {});
+    tryPlay();
+    document.addEventListener("pointerdown", tryPlay, { once: true });
+    return () => document.removeEventListener("pointerdown", tryPlay);
+  }, [prefersReducedMotion, videoFailed, isOverview]);
+
   const backendTone = health.state === "ok" ? "ok" : health.state === "loading" ? "idle" : "error";
   const backendLabel =
     health.state === "ok" ? "Online" : health.state === "loading" ? "Checking" : "Offline";
@@ -55,7 +77,28 @@ export default function Layout() {
 
   return (
     <div className="shell">
-      <div className="bg-field" aria-hidden="true" />
+      {/* The real golden-hour field is the Overview page's background, not a boxed
+         hero element — it plays fixed and full-bleed behind the glass shell, with
+         a dark overlay + vignette layered over it for text contrast. Every other
+         page keeps the plain obsidian/radial-gradient treatment (see bg-field
+         rules in index.css). A missing/failed video falls back to the same still
+         poster + gradient the rest of the app already uses. */}
+      <div className={`bg-field ${isOverview ? "bg-field--video" : ""}`} aria-hidden="true">
+        {isOverview && !videoFailed && (
+          <video
+            ref={videoRef}
+            className="bg-field__video"
+            autoPlay={!prefersReducedMotion}
+            muted
+            loop
+            playsInline
+            poster="/maize-field-golden-hour-poster.jpg"
+            onError={() => setVideoFailed(true)}
+          >
+            <source src="/maize-field-golden-hour.mp4" type="video/mp4" />
+          </video>
+        )}
+      </div>
 
       <a href="#main" className="sr-only">
         Skip to main content
@@ -72,8 +115,8 @@ export default function Layout() {
               <path d="M12 4.6v15.2" stroke="rgba(36,29,5,.32)" strokeWidth="1.1" />
               <defs>
                 <linearGradient id="kernel" x1="7" y1="2" x2="17" y2="22">
-                  <stop stopColor="#F7D97A" />
-                  <stop offset="1" stopColor="#C9A233" />
+                  <stop stopColor="var(--gold-bright)" />
+                  <stop offset="1" stopColor="var(--gold-dim)" />
                 </linearGradient>
               </defs>
             </svg>

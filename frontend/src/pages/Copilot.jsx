@@ -96,7 +96,7 @@ export default function Copilot() {
       <div className="co__layout">
         {/* ---------- context ---------- */}
         <div className="co__context">
-          <GlassCard>
+          <GlassCard tier="primary">
             <h3 className="co__label">Analysis context</h3>
 
             {listState === "loading" && (
@@ -166,7 +166,11 @@ export default function Copilot() {
                           <span>Defect pattern</span>
                           <ProvenanceBadge synthetic={false} />
                         </div>
-                        <strong className="co__ctxval co__ctxval--warn">
+                        <strong
+                          className={`co__ctxval ${
+                            /^(bad|defect)/i.test(defect.predicted_class) ? "co__ctxval--warn" : ""
+                          }`}
+                        >
                           {pretty(defect.predicted_class)}
                         </strong>
                         <ConfidenceBar value={defect.confidence} showValue label={null} />
@@ -180,7 +184,7 @@ export default function Copilot() {
         </div>
 
         {/* ---------- conversation ---------- */}
-        <GlassCard accent="cyan" className="co__chat">
+        <GlassCard accent="cyan" tier="primary" className="co__chat">
           <div className="co__chathead">
             <span className="co__aiorb" aria-hidden="true">
               <Sparkles size={14} />

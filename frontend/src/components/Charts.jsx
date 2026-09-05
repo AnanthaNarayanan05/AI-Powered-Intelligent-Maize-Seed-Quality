@@ -11,7 +11,11 @@
 import { motion } from "framer-motion";
 import "./charts.css";
 
-const SERIES = ["#F4C542", "#6FBF73", "#48D6C6", "#E0A340", "#8FA8C8", "#C98A1B"];
+const SERIES_TOKENS = ["--gold", "--green", "--cyan", "--warn", "--chart-slate", "--chart-amber-dark"];
+
+function seriesColor(i) {
+  return `var(${SERIES_TOKENS[i % SERIES_TOKENS.length]})`;
+}
 
 export function DonutChart({ data, size = 168, thickness = 22, emptyMessage = "No data yet" }) {
   const entries = Object.entries(data || {}).filter(([, v]) => v > 0);
@@ -37,7 +41,7 @@ export function DonutChart({ data, size = 168, thickness = 22, emptyMessage = "N
                 cy={size / 2}
                 r={r}
                 fill="none"
-                stroke={SERIES[i % SERIES.length]}
+                stroke={seriesColor(i)}
                 strokeWidth={thickness}
                 strokeDasharray={`${dash} ${c - dash}`}
                 strokeDashoffset={-offset}
@@ -61,7 +65,7 @@ export function DonutChart({ data, size = 168, thickness = 22, emptyMessage = "N
       <ul className="donut__legend">
         {entries.map(([name, v], i) => (
           <li key={name}>
-            <span className="donut__swatch" style={{ background: SERIES[i % SERIES.length] }} />
+            <span className="donut__swatch" style={{ background: seriesColor(i) }} />
             <span className="donut__name">{name.replace(/_/g, " ")}</span>
             <span className="donut__val mono">
               {v} · {((v / total) * 100).toFixed(0)}%

@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { Layers, Images, Sprout, Gauge, Trophy, RotateCcw, Sparkles, HelpCircle } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
+import { isVarietyRow } from "../lib/seedHealth";
 import {
   Badge,
   Button,
@@ -74,7 +75,7 @@ export default function Batch() {
 
   const stats = batch?.aggregate_stats;
   const confidences = details.flatMap((d) =>
-    (d.classifications || []).filter((c) => !c.is_synthetic_model).map((c) => c.confidence)
+    (d.classifications || []).filter(isVarietyRow).map((c) => c.confidence)
   );
   const topVariety = stats?.variety_distribution
     ? Object.entries(stats.variety_distribution).sort((a, b) => b[1] - a[1])[0]
@@ -94,7 +95,7 @@ export default function Batch() {
         }
       />
 
-      <GlassCard>
+      <GlassCard tier="primary">
         <UploadZone
           files={files}
           onFiles={(f) => {
@@ -245,7 +246,7 @@ export default function Batch() {
             </GlassCard>
           )}
 
-          <GlassCard accent="cyan">
+          <GlassCard accent="cyan" tier="primary">
             <SectionHeader
               title="AI batch summary"
               subtitle="Gemini summarises the verified aggregate results above."
@@ -284,11 +285,11 @@ export default function Batch() {
           </GlassCard>
 
           {details.length > 0 && (
-            <GlassCard>
+            <GlassCard tier="primary">
               <SectionHeader title="Images in this batch" level={3} />
               <div className="ba__grid">
                 {details.map((d, i) => {
-                  const top = (d.classifications || []).find((c) => !c.is_synthetic_model);
+                  const top = (d.classifications || []).find(isVarietyRow);
                   return (
                     <motion.div
                       className="bcard"

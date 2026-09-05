@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { ClipboardList, Sprout, ShieldAlert, Info } from "lucide-react";
 import { api } from "../api/client";
+import { isVarietyRow } from "../lib/seedHealth";
 import {
   Badge,
   Button,
@@ -54,7 +55,7 @@ export default function Lot() {
     const s = new Set();
     for (const a of analyses)
       for (const c of a.classifications || [])
-        if (!c.is_synthetic_model && c.predicted_class) s.add(c.predicted_class);
+        if (isVarietyRow(c) && c.predicted_class) s.add(c.predicted_class);
     return [...s].sort();
   }, [analyses]);
 
@@ -123,7 +124,7 @@ export default function Lot() {
 
       {listState === "ready" && analyses.length > 0 && (
         <>
-          <GlassCard>
+          <GlassCard tier="primary">
             <SectionHeader
               title="Build the lot"
               level={3}
@@ -221,7 +222,7 @@ export default function Lot() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.35 }}
             >
-              <GlassCard>
+              <GlassCard tier="primary">
                 <SectionHeader
                   title={d.lot_reference ? `Lot ${d.lot_reference}` : "Lot summary"}
                   level={3}

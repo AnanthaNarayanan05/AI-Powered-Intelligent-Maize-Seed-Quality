@@ -168,13 +168,13 @@
 .lot__bartrack {
   height: 7px;
   border-radius: var(--r-full);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(245, 242, 232, 0.06);
   overflow: hidden;
 }
 .lot__barfill {
   height: 100%;
   border-radius: var(--r-full);
-  background: linear-gradient(90deg, #C9A233, #F7D97A);
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold-bright));
 }
 .lot__bar small {
   font-size: var(--text-xs);

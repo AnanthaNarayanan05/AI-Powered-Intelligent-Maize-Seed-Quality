@@ -5,6 +5,11 @@
    ============================================================ */
 
 :root {
+  /* Dark-only design, no light variant — tells the browser to render native
+     form chrome (select popups, checkboxes, scrollbars) with the dark UA
+     palette instead of defaulting to light regardless of OS theme. */
+  color-scheme: dark;
+
   /* ---- surfaces: obsidian base, layered upward ---- */
   --bg-base: #080b0a;
   --bg-1: #101512;
@@ -12,11 +17,17 @@
   --bg-3: #18201c;
   --bg-elevated: #1c2521;
 
-  /* ---- glass ---- */
-  --glass-bg: rgba(20, 26, 23, 0.72);
+  /* ---- glass hierarchy ----
+     secondary = default card surface (metrics, module cards, list rows)
+     primary   = major structural panels (sidebar, topbar, hero copy, chat)
+     floating  = layered-above-content surfaces (dropdowns, tooltips, modals) */
+  --glass-bg: rgba(18, 24, 21, 0.68);
+  --glass-bg-primary: rgba(11, 17, 14, 0.64);
+  --glass-bg-floating: rgba(13, 19, 16, 0.58);
   --glass-border: rgba(245, 242, 232, 0.08);
   --glass-border-strong: rgba(245, 242, 232, 0.14);
-  --glass-blur: 14px;
+  --glass-blur: 16px;
+  --glass-blur-strong: 26px;
 
   /* ---- accents ----
      gold  = results, seed intelligence, primary actions, high-value metrics
@@ -24,6 +35,7 @@
      cyan  = AI, embeddings, Gemini, neural activity                        */
   --gold: #f4c542;
   --gold-dim: #c9a233;
+  --gold-bright: #f7d97a;
   --gold-glow: rgba(244, 197, 66, 0.18);
   --green: #6fbf73;
   --green-dim: #4e8f52;
@@ -31,6 +43,10 @@
   --cyan: #48d6c6;
   --cyan-dim: #2f9e92;
   --cyan-glow: rgba(72, 214, 198, 0.16);
+
+  /* ---- chart-only accents (not part of the core identity triad) ---- */
+  --chart-slate: #8fa8c8;
+  --chart-amber-dark: #c98a1b;
 
   /* ---- state ---- */
   --danger: #e8705a;
@@ -44,8 +60,8 @@
   --ink-faint: #6f7d72;
 
   /* ---- type ---- */
-  --font-sans: "Inter", "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", Consolas, monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.85rem;
