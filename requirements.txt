@@ -25,6 +25,10 @@ python-multipart>=0.0.9
 google-genai>=1.0
 python-dotenv>=1.0
 
+# Reporting (src/analysis/render_report.py — renders docs/*.md to PDF via headless
+# Edge/Chrome, no native GTK/Cairo dependency)
+markdown>=3.6
+
 # Testing
 pytest>=8.2
 httpx>=0.27

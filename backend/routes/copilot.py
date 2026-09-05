@@ -11,7 +11,7 @@ from backend.schemas.copilot import (
     CopilotChatRequest, ExplainAnalysisRequest, SummarizeBatchRequest, CompareRequest, CopilotResponse,
 )
 from backend.services.history_service import get_analysis, get_batch
-from backend.services.gemini_service import generate_text
+from backend.services.gemini_service import generate_text, summarize_analysis
 
 router = APIRouter(prefix="/api/copilot", tags=["copilot"])
 
@@ -27,7 +27,8 @@ async def chat(req: CopilotChatRequest):
         raise HTTPException(status_code=404, detail="Analysis not found")
 
     prompt = (
-        f"Here is a verified maize seed analysis result (JSON):\n{json.dumps(analysis, indent=2)}\n\n"
+        f"Here is a verified maize seed analysis result, summarized from per-seed model "
+        f"output (JSON):\n{json.dumps(summarize_analysis(analysis), indent=2)}\n\n"
         f"User question: {req.question}\n"
         f"Answer using ONLY the data above. If the question asks about something this "
         f"system does not compute (e.g. real disease, exact defect area, purity), say so plainly."
@@ -46,7 +47,8 @@ async def explain_analysis(req: ExplainAnalysisRequest):
         f"Explain this verified maize seed analysis result to a student in clear, simple "
         f"language. Cover: how many seeds were detected, what varieties/synthetic-defect "
         f"classes were predicted and with what confidence, and what limitations apply. "
-        f"Data (JSON):\n{json.dumps(analysis, indent=2)}"
+        f"Data is summarized from per-seed model output (JSON):\n"
+        f"{json.dumps(summarize_analysis(analysis), indent=2)}"
     )
     text, reason = generate_text(prompt)
     return _respond(text, reason)
@@ -77,12 +79,13 @@ async def compare(req: CompareRequest):
         a = get_analysis(aid)
         if a is None:
             raise HTTPException(status_code=404, detail=f"Analysis not found: {aid}")
-        analyses.append(a)
+        analyses.append(summarize_analysis(a))
 
     prompt = (
         f"Compare these {len(analyses)} verified maize seed analyses: seed counts, "
         f"predicted varieties, synthetic-defect predictions, and confidence levels. "
-        f"Highlight real differences only. Data (JSON):\n{json.dumps(analyses, indent=2)}"
+        f"Highlight real differences only. Data is summarized from per-seed model output "
+        f"(JSON):\n{json.dumps(analyses, indent=2)}"
     )
     text, reason = generate_text(prompt)
     return _respond(text, reason)

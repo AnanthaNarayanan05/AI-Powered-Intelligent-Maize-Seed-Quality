@@ -25,6 +25,8 @@ translate mechanically:
 """
 from __future__ import annotations
 
+from collections import Counter
+
 from backend.config import GEMINI_API_KEY, GEMINI_MODEL, gemini_is_configured
 from src.utils.logging_utils import get_logger
 
@@ -48,6 +50,82 @@ Ground rules you MUST follow:
 - Be honest about uncertainty: low confidence scores should be described as such,
   not smoothed over.
 """.strip()
+
+def _confidence_stats(values: list[float]) -> dict | None:
+    if not values:
+        return None
+    return {
+        "mean": round(sum(values) / len(values), 4),
+        "min": round(min(values), 4),
+        "max": round(max(values), 4),
+    }
+
+
+def summarize_analysis(analysis: dict) -> dict:
+    """Reduces a stored analysis to what a prompt needs, without inventing anything.
+
+    A single analysis can carry hundreds of per-seed records (detections,
+    two classifications and one similarity/assessment row per seed, each with its
+    own nested detail), so the raw dict for a 300-seed image serializes to over a
+    megabyte -- more input than the free-tier Gemini quota allows in one request,
+    and far more than "how many seeds, what classes, what confidence, what
+    limitations" needs. This aggregates counts and confidence stats from the same
+    real records rather than sending them one row per seed; it drops no field
+    Gemini would otherwise see, it only stops repeating it 300 times.
+    """
+    detections = analysis.get("detections") or []
+    classifications = analysis.get("classifications") or []
+    similarities = analysis.get("similarities") or []
+    assessments = analysis.get("assessments") or []
+
+    by_model: dict[str, dict] = {}
+    for c in classifications:
+        model = c.get("model_name", "unknown")
+        bucket = by_model.setdefault(model, {"classes": Counter(), "confidences": []})
+        bucket["classes"][c.get("predicted_class")] += 1
+        if c.get("confidence") is not None:
+            bucket["confidences"].append(c["confidence"])
+    classification_summary = {
+        model: {
+            "predicted_class_counts": dict(bucket["classes"]),
+            "confidence": _confidence_stats(bucket["confidences"]),
+        }
+        for model, bucket in by_model.items()
+    }
+
+    symptom_status_counts = Counter(a.get("symptom_status") for a in assessments)
+    symptom_class_counts = Counter(
+        a.get("symptom_class") for a in assessments if a.get("symptom_status") == "reported"
+    )
+    foreign_object_status_counts = Counter(a.get("foreign_object_status") for a in assessments)
+    in_distribution_count = sum(1 for a in assessments if a.get("in_distribution") is True)
+
+    return {
+        "analysis_id": analysis.get("analysis_id"),
+        "created_at": analysis.get("created_at"),
+        "image_filename": analysis.get("image_filename"),
+        "status": analysis.get("status"),
+        "seed_count": analysis.get("seed_count"),
+        "variety_dataset_used": analysis.get("variety_dataset_used"),
+        "model_versions": analysis.get("model_versions"),
+        "segmentation_status": analysis.get("segmentation_status"),
+        "detection": {
+            "count": len(detections),
+            "confidence": _confidence_stats([d.get("confidence") for d in detections if d.get("confidence") is not None]),
+        },
+        "classification_by_model": classification_summary,
+        "similarity_search": {
+            "seeds_with_results": len(similarities),
+        },
+        "assessment_summary": {
+            "seeds_assessed": len(assessments),
+            "in_distribution_count": in_distribution_count,
+            "symptom_status_counts": dict(symptom_status_counts),
+            "symptom_class_counts_reported_only": dict(symptom_class_counts),
+            "foreign_object_status_counts": dict(foreign_object_status_counts),
+        },
+    }
+
 
 # Built on first use and reused. Module-level rather than lru_cache so that the
 # reload the tests perform to swap the key also discards the client holding the

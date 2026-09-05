@@ -7,6 +7,10 @@ Converts Markdown -> styled HTML -> PDF via headless Edge/Chrome, which avoids t
 GTK/Cairo native dependencies that WeasyPrint needs on Windows.
 
     python -m src.analysis.render_report --in docs/09_PROJECT_STATUS_REPORT.md
+
+Unless --out is given explicitly, a native "Save As" dialog asks where to write the
+PDF, defaulting to the source's own folder and name -- so a run never silently
+overwrites the last export in place without the person at the keyboard seeing it.
 """
 from __future__ import annotations
 
@@ -44,6 +48,39 @@ li { margin: 2px 0; }
 h2, h3 { page-break-after: avoid; }
 table, pre, blockquote { page-break-inside: avoid; }
 """
+
+
+def ask_save_path(default_path: str) -> str | None:
+    """Native "Save As" dialog defaulting to `default_path`. Returns None if the
+    person cancelled, or if no display is available to show a dialog at all (e.g.
+    a headless CI run) -- callers must not treat None as "use the default silently",
+    since that would defeat the point of asking.
+    """
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except ImportError:
+        print("No tkinter available to show a Save As dialog.", file=sys.stderr)
+        return None
+
+    default_dir = os.path.dirname(os.path.abspath(default_path)) or "."
+    default_name = os.path.basename(default_path)
+
+    root = tkinter.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        chosen = filedialog.asksaveasfilename(
+            title="Save project report as",
+            initialdir=default_dir,
+            initialfile=default_name,
+            defaultextension=".pdf",
+            filetypes=[("PDF document", "*.pdf"), ("All files", "*.*")],
+        )
+    finally:
+        root.destroy()
+
+    return chosen or None
 
 
 def find_browser() -> str | None:
@@ -118,12 +155,24 @@ def render(md_path: str, pdf_path: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--in", dest="src", default="docs/09_PROJECT_STATUS_REPORT.md")
-    parser.add_argument("--out", dest="dst", default=None)
+    parser.add_argument(
+        "--out", dest="dst", default=None,
+        help="Write here without prompting. Omit to choose the destination in a "
+             "Save As dialog instead.",
+    )
     args = parser.parse_args()
 
-    dst = args.dst or os.path.splitext(args.src)[0] + ".pdf"
     if not os.path.exists(args.src):
         sys.exit(f"Missing input: {args.src}")
+
+    default_dst = os.path.splitext(args.src)[0] + ".pdf"
+    if args.dst:
+        dst = args.dst
+    else:
+        dst = ask_save_path(default_dst)
+        if dst is None:
+            sys.exit("Save cancelled; no PDF written.")
+
     render(args.src, dst)
 
 
