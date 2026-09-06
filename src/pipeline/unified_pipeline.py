@@ -57,6 +57,7 @@ class AnalysisPipeline:
         self._detection_model = None
         self._variety_models: dict[str, object] = {}
         self._unified_model = None
+        self._calibration = None
         self._quality_reference = None
         self._maize_reference = None
         self._synthetic_model = None
@@ -211,6 +212,37 @@ class AnalysisPipeline:
             model.eval()
             self._unified_model = (model, state["variety_classes"], state["quality_classes"])
         return self._unified_model
+
+    def _get_calibration(self) -> dict:
+        """Phase 17: per-head temperature scaling, fit and verified by
+        src/analysis/calibrate_unified.py against validation, checked once
+        against test. Returns {"variety": T or None, "quality": T or None}.
+
+        A head's temperature is used only when the calibration file's recorded
+        checkpoint hash still matches the checkpoint this pipeline actually
+        loaded, and only when that run's test ECE cleared the bar chosen before
+        display was allowed. Either check failing serves that head's raw softmax
+        -- unchanged, not silently divided by a stale or unmeasured T -- because
+        a retrain that moves the logits also invalidates a temperature fit
+        against the old ones, and this must never be assumed still safe."""
+        if self._calibration is None:
+            self._calibration = {"variety": None, "quality": None}
+            path = os.path.join(self.cfg["paths"]["checkpoints"], "unified_calibration.json")
+            if os.path.exists(path):
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        payload = json.load(f)
+                    from src.registry.model_registry import checkpoint_sha256
+
+                    live_hash = checkpoint_sha256(self._checkpoint_for("variety"))
+                    if live_hash is not None and payload.get("checkpoint_sha256") == live_hash:
+                        for head in ("variety", "quality"):
+                            entry = payload.get(head) or {}
+                            if entry.get("accepted_for_display") and entry.get("temperature"):
+                                self._calibration[head] = float(entry["temperature"])
+                except (OSError, ValueError, KeyError):
+                    logger.warning("unified_calibration.json present but unreadable; serving raw softmax")
+        return self._calibration
 
     def _get_quality_reference(self):
         """Embeddings of the Mendeley training split plus the calibrated distance
@@ -443,17 +475,24 @@ class AnalysisPipeline:
         caller keeps working. Callers that hold the whole image should pass how
         many objects were detected in it: the foreign-object gate needs it to know
         whether the scene is one it was calibrated on.
+
+        Confidence and class_probabilities are temperature-scaled per Phase 17
+        when a verified calibration is available for that head (see
+        _get_calibration); ``confidence_calibrated`` says which. Temperature
+        scaling is a monotonic rescaling of the same logits, so predicted_class
+        is identical either way -- only the number is different.
         """
         import torch
 
         model, v_classes, q_classes = self._get_unified_model()
+        calibration = self._get_calibration()
         tensor = self._get_eval_transform()(crop_image).unsqueeze(0).to(self.device)
         with torch.no_grad():
             embedding = model(tensor, mode="embedding")
             v_logits = model.variety_head(embedding)
             q_logits = model.quality_head(embedding)
-            v_probs = torch.softmax(v_logits, dim=1).cpu().numpy()[0]
-            q_probs = torch.softmax(q_logits, dim=1).cpu().numpy()[0]
+            v_probs = torch.softmax(v_logits / (calibration["variety"] or 1.0), dim=1).cpu().numpy()[0]
+            q_probs = torch.softmax(q_logits / (calibration["quality"] or 1.0), dim=1).cpu().numpy()[0]
             emb = embedding.cpu().numpy()[0]
 
         vi, qi = int(np.argmax(v_probs)), int(np.argmax(q_probs))
@@ -463,6 +502,7 @@ class AnalysisPipeline:
             "class_probabilities": {c: round(float(p), 4) for c, p in zip(v_classes, v_probs)},
             "model": "unified_seed_model",
             "is_synthetic_model": False,
+            "confidence_calibrated": calibration["variety"] is not None,
         }
         quality = {
             "predicted_class": q_classes[qi],
@@ -471,6 +511,7 @@ class AnalysisPipeline:
             "model": "unified_seed_model_quality",
             "is_synthetic_model": False,
             "label_source": "Mendeley EfficientMaize expert-assigned Good/Bad kernel labels",
+            "confidence_calibrated": calibration["quality"] is not None,
         }
 
         # Softmax confidence does not detect extrapolation -- it runs HIGHER on some
@@ -504,6 +545,91 @@ class AnalysisPipeline:
                                             crop_px=min(crop_image.size),
                                             scene_objects=scene_objects)
         return variety, quality, foreign
+
+    def classify_unified_full_batch(self, crop_images: list, scene_objects=None) -> list:
+        """Phase 21. Same contract as classify_unified_full, called once for a
+        whole scene's crops instead of once per crop.
+
+        Measured cause, not a guess: profiling a 300-seed lot photo (docs/09
+        section 9's GPU pass) showed the unified head's batch-of-one forward
+        pass dominating per-seed cost -- the GPU sits mostly idle between tiny
+        single-crop launches. Stacking every crop into one tensor and running
+        the backbone and both heads ONCE removes exactly that idle time.
+        eval() mode makes this numerically a non-event: BatchNorm reads its
+        stored running statistics regardless of batch size, so a crop's variety
+        and quality distributions here match what classify_unified_full would
+        have returned for it alone to within GPU floating-point tolerance --
+        cuDNN can pick a different reduction kernel for batch-of-1 versus
+        batch-of-N, so results agree to ~1e-3, not bit-for-bit (see
+        test_a_batch_of_crops_matches_calling_the_single_crop_method_on_each_one).
+        The predicted class, and every quantity built on it, never moves.
+        Everything downstream of the embedding -- the distribution distance,
+        the foreign-object gate -- is cheap numpy per crop already and stays a
+        Python loop; only the two GPU forward passes are batched.
+        """
+        import torch
+
+        if not crop_images:
+            return []
+
+        model, v_classes, q_classes = self._get_unified_model()
+        calibration = self._get_calibration()
+        transform = self._get_eval_transform()
+        batch = torch.stack([transform(c) for c in crop_images]).to(self.device)
+        with torch.no_grad():
+            embedding = model(batch, mode="embedding")
+            v_probs = torch.softmax(
+                model.variety_head(embedding) / (calibration["variety"] or 1.0), dim=1
+            ).cpu().numpy()
+            q_probs = torch.softmax(
+                model.quality_head(embedding) / (calibration["quality"] or 1.0), dim=1
+            ).cpu().numpy()
+            emb = embedding.cpu().numpy()
+
+        ref = self._get_quality_reference()
+        results = []
+        for i, crop_image in enumerate(crop_images):
+            vi, qi = int(np.argmax(v_probs[i])), int(np.argmax(q_probs[i]))
+            variety = {
+                "predicted_class": v_classes[vi],
+                "confidence": round(float(v_probs[i][vi]), 4),
+                "class_probabilities": {c: round(float(p), 4) for c, p in zip(v_classes, v_probs[i])},
+                "model": "unified_seed_model",
+                "is_synthetic_model": False,
+                "confidence_calibrated": calibration["variety"] is not None,
+            }
+            quality = {
+                "predicted_class": q_classes[qi],
+                "confidence": round(float(q_probs[i][qi]), 4),
+                "class_probabilities": {c: round(float(p), 4) for c, p in zip(q_classes, q_probs[i])},
+                "model": "unified_seed_model_quality",
+                "is_synthetic_model": False,
+                "label_source": "Mendeley EfficientMaize expert-assigned Good/Bad kernel labels",
+                "confidence_calibrated": calibration["quality"] is not None,
+            }
+
+            quality_distance = None
+            if ref:
+                reference, threshold, k = ref
+                e = emb[i] / (np.linalg.norm(emb[i]) + 1e-8)
+                sims = reference @ e
+                dist = float(1.0 - np.partition(sims, -k)[-k:].mean())
+                quality_distance = dist
+                quality["distribution_distance"] = round(dist, 4)
+                quality["distribution_threshold"] = round(threshold, 4)
+                quality["out_of_distribution"] = bool(dist > threshold)
+                if quality["out_of_distribution"]:
+                    quality["caveat"] = (
+                        "This kernel does not resemble the images the quality model was "
+                        "trained and validated on, so its grade is an extrapolation rather "
+                        "than a measurement. Treat it as unverified."
+                    )
+
+            foreign = self._flag_foreign_object(emb[i], quality_distance,
+                                                crop_px=min(crop_image.size),
+                                                scene_objects=scene_objects)
+            results.append((variety, quality, foreign))
+        return results
 
     # ---------- visible symptom ----------
     def _get_symptom_gate(self, checkpoint: str) -> dict:

@@ -34,7 +34,7 @@ import datetime
 import uuid
 
 from sqlalchemy import (
-    Column, String, Integer, Float, DateTime, JSON, ForeignKey, Text, UniqueConstraint,
+    Column, String, Integer, Float, DateTime, JSON, ForeignKey, Text, UniqueConstraint, Boolean,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -128,6 +128,10 @@ class Classification(Base):
     confidence = Column(Float)
     class_probabilities = Column(JSON)
     is_synthetic_model = Column(Integer, default=0)  # 0/1 boolean flag, always explicit
+    # Phase 17. NULL for every row written before calibration existed -- that is
+    # the honest value, not False: nobody measured whether that number meant
+    # anything, so it must not read as "measured and found uncalibrated".
+    confidence_calibrated = Column(Boolean, nullable=True)
 
     analysis = relationship("Analysis", back_populates="classifications")
 

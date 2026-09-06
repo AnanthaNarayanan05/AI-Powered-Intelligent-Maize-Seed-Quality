@@ -49,7 +49,7 @@ def _apply_additive_migrations(engine) -> None:
             "segmentation_status": "JSON",
         },
         "detections": {"kernel_px": "INTEGER"},
-        "classifications": {"model_version": "VARCHAR"},
+        "classifications": {"model_version": "VARCHAR", "confidence_calibrated": "BOOLEAN"},
         # Phase 5. Null on every row written before the visible-symptom capability
         # existed, which is the honest value: those kernels were never scored for
         # it, and a backfill would be inventing verdicts.

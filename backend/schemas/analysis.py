@@ -24,6 +24,11 @@ class VarietyPrediction(BaseModel):
     confidence: float
     class_probabilities: dict[str, float]
     model: str
+    # Phase 17: true only when confidence/class_probabilities were produced with
+    # a verified temperature scaling fit for this checkpoint (see
+    # src/pipeline/unified_pipeline.py::_get_calibration). False means raw
+    # softmax -- not miscalibrated by construction, just unmeasured.
+    confidence_calibrated: bool = False
 
 
 class SyntheticDefectPrediction(BaseModel):
