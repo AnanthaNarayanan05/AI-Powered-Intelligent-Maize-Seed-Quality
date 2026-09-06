@@ -4,6 +4,7 @@ import { Layers, Images, Sprout, Gauge, Trophy, RotateCcw, Sparkles, HelpCircle 
 import { api, mediaUrl } from "../api/client";
 import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
 import { isVarietyRow } from "../lib/seedHealth";
+import { useSettings } from "../lib/settings";
 import {
   Badge,
   Button,
@@ -24,7 +25,11 @@ const pretty = (s) => (s ? s.replace(/_/g, " ") : "—");
 
 export default function Batch() {
   const [files, setFiles] = useState([]);
-  const [dataset] = useState("unified");
+  // Same variety-model preference the Analyze page uses (Settings → Analysis).
+  // /api/analyze/batch takes no run_similarity flag, so that preference does not
+  // apply here and the Settings page says so rather than implying it does.
+  const { settings } = useSettings();
+  const dataset = settings.defaultModel;
   const [status, setStatus] = useState("idle"); // idle | running | done | error
   const [batch, setBatch] = useState(null);
   const [details, setDetails] = useState([]);
@@ -312,7 +317,12 @@ export default function Batch() {
                       {top ? (
                         <>
                           <span className="bcard__variety">{pretty(top.predicted_class)}</span>
-                          <ConfidenceBar value={top.confidence} showValue label={null} />
+                          <ConfidenceBar
+                            value={top.confidence}
+                            calibrated={top.confidence_calibrated}
+                            showValue
+                            label={null}
+                          />
                         </>
                       ) : (
                         <span className="bcard__variety faint">No variety prediction</span>

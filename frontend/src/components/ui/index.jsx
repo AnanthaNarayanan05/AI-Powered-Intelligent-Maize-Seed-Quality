@@ -106,13 +106,17 @@ export function ProvenanceBadge({ synthetic }) {
 }
 
 /* ---------- ConfidenceBar ---------- */
-// Hidden project-wide for now: displayed confidence is uncalibrated and, for
-// some models (visible-symptom classifier), deliberately low by design. Bring
-// this back once calibration/coverage is improved -- see model_registry.yaml.
-const SHOW_CONFIDENCE = false;
-
-export function ConfidenceBar({ value, tone, label, showValue = true, delay = 0 }) {
-  if (!SHOW_CONFIDENCE) return null;
+// Phase 17: a bar renders only for a number this project has actually verified
+// means what it says -- reliability diagram, ECE and Brier score measured on
+// held-out data, via src/analysis/calibrate_unified.py. `calibrated` must be
+// threaded from that prediction's own confidence_calibrated field (variety and
+// quality predictions carry it; nothing else does yet), and defaults to false
+// so a call site that forgets to pass it gets the safe, hidden behaviour
+// instead of quietly starting to show an unmeasured number. The visible-symptom
+// classifier's confidence is real but was never put through this measurement,
+// so it stays hidden until it earns the same treatment.
+export function ConfidenceBar({ value, tone, label, showValue = true, delay = 0, calibrated = false }) {
+  if (!calibrated) return null;
   const pct = Math.max(0, Math.min(1, value ?? 0));
   // Low confidence must look different from high confidence, not just read differently.
   const auto = pct >= 0.85 ? "ok" : pct >= 0.6 ? "warn" : "error";

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
+import { useSettings } from "../lib/settings";
 import {
   foreignFlag,
   foreignUnavailable,
@@ -223,7 +224,11 @@ function SegmentationPanel({ segmentation }) {
 
 export default function Analyze() {
   const [files, setFiles] = useState([]);
-  const [dataset] = useState("unified");
+  // Which variety model runs, and whether the gallery search runs with it, are
+  // both preferences (Settings → Analysis). Read live rather than copied into
+  // state, so a change on that page applies to the next run without a reload.
+  const { settings } = useSettings();
+  const dataset = settings.defaultModel;
   const [status, setStatus] = useState("idle"); // idle | running | done | error
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -274,7 +279,9 @@ export default function Analyze() {
     setResult(null);
     selectSeed(null);
     try {
-      const data = await api.analyzeImage(file, dataset);
+      const data = await api.analyzeImage(file, dataset, {
+        runSimilarity: settings.runSimilarity,
+      });
       setResult(data);
       setStatus("done");
       if (data.seeds?.length) setSelected(0);
@@ -486,6 +493,7 @@ export default function Analyze() {
                         </h3>
                         <ConfidenceBar
                           value={active.variety_prediction?.confidence}
+                          calibrated={active.variety_prediction?.confidence_calibrated}
                           label="Confidence"
                         />
                         <div className="an__probs">
@@ -494,7 +502,13 @@ export default function Analyze() {
                             .map(([cls, p], i) => (
                               <div className="an__prob" key={cls}>
                                 <span className="an__probname">{pretty(cls)}</span>
-                                <ConfidenceBar value={p} showValue delay={0.05 * i} label={null} />
+                                <ConfidenceBar
+                                  value={p}
+                                  showValue
+                                  delay={0.05 * i}
+                                  label={null}
+                                  calibrated={active.variety_prediction?.confidence_calibrated}
+                                />
                               </div>
                             ))}
                         </div>
@@ -530,6 +544,7 @@ export default function Analyze() {
                             </h3>
                             <ConfidenceBar
                               value={active.quality_prediction.confidence}
+                              calibrated={active.quality_prediction.confidence_calibrated}
                               label="Confidence"
                             />
                             <p className="an__disclaimer">

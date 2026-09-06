@@ -54,7 +54,12 @@ function Side({ analysis, label }) {
         {v ? (
           <>
             <strong className="cmp__val">{pretty(v.predicted_class)}</strong>
-            <ConfidenceBar value={v.confidence} showValue label={null} />
+            <ConfidenceBar
+              value={v.confidence}
+              calibrated={v.confidence_calibrated}
+              showValue
+              label={null}
+            />
           </>
         ) : (
           <span className="faint">No variety prediction</span>
@@ -73,7 +78,12 @@ function Side({ analysis, label }) {
             >
               {pretty(d.predicted_class)}
             </strong>
-            <ConfidenceBar value={d.confidence} showValue label={null} />
+            <ConfidenceBar
+              value={d.confidence}
+              calibrated={d.confidence_calibrated}
+              showValue
+              label={null}
+            />
           </>
         ) : (
           <span className="faint">No quality grade</span>
