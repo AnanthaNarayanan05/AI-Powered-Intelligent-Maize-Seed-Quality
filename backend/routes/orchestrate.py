@@ -8,11 +8,13 @@ every honest refusal optional.
 """
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
 from backend.routes.analyze import _save_upload
 from backend.schemas.orchestrator import CapabilityReport, OrchestratedResponse
-from backend.services.history_service import save_analysis_result
+from backend.services.history_service import get_analysis, save_analysis_result
 from backend.services.orchestrator_service import get_orchestrator, OrchestratorError
 from backend.services.pipeline_service import InvalidImageError
 from src.utils.logging_utils import get_logger
@@ -50,15 +52,39 @@ async def ask(
 
     path = _save_upload(file) if file is not None else None
     orchestrator = get_orchestrator()
+    already_recorded = False
     try:
         result = orchestrator.run(
             image_path=path, question=question, intent=intent,
             analysis_id=analysis_id, top_k=top_k,
         )
     except OrchestratorError as e:
-        # An unknown intent or an expired analysis_id is the caller's to fix, and
-        # the message says which.
-        raise HTTPException(status_code=400, detail=str(e))
+        # A cache miss on a known id -- the process restarted, the LRU evicted it,
+        # or this id was recorded by the legacy /api/analyze/image route, which
+        # never runs the orchestrator at all -- is not the same failure as an
+        # unknown intent or a truly nonexistent id. If history still has the
+        # image on disk, re-run detection on that SAME file under the SAME id:
+        # genuine re-inference, never a fabricated reuse of an answer that was
+        # never actually cached. Only attempted when the caller sent an id and
+        # no file of their own to fall back on.
+        record = get_analysis(analysis_id) if path is None and analysis_id else None
+        stored_path = record.get("image_path") if record else None
+        if stored_path and os.path.exists(stored_path):
+            already_recorded = True
+            try:
+                result = orchestrator.run(
+                    image_path=stored_path, question=question, intent=intent,
+                    analysis_id=analysis_id, top_k=top_k,
+                )
+            except InvalidImageError as e2:
+                raise HTTPException(status_code=400, detail=str(e2))
+            except Exception:  # noqa: BLE001
+                logger.exception("Unexpected error re-hydrating analysis %s", analysis_id)
+                raise HTTPException(
+                    status_code=500, detail="Internal error during analysis. Please try again."
+                )
+        else:
+            raise HTTPException(status_code=400, detail=str(e))
     except InvalidImageError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:  # noqa: BLE001
@@ -67,8 +93,8 @@ async def ask(
 
     # Persisted once per image, on the run that actually detected it. Later
     # questions reuse that same analysis_id, so writing again would be a duplicate
-    # row rather than a second analysis.
-    if "detect" in result["executed"]:
+    # row rather than a second analysis -- and a re-hydrated run already has one.
+    if "detect" in result["executed"] and not already_recorded:
         try:
             save_analysis_result(
                 result, "unified",

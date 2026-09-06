@@ -504,7 +504,7 @@ class Orchestrator:
         return self._pipeline
 
     # ---------------------------------------------------------------- caching
-    def _state_for(self, image_path: str) -> RunState:
+    def _state_for(self, image_path: str, preferred_id: str | None = None) -> RunState:
         digest = _digest(image_path)
         state = self._runs.get(digest)
         if state is not None:
@@ -514,7 +514,14 @@ class Orchestrator:
             state.image_path = image_path
             return state
 
-        state = RunState(digest=digest, analysis_id=str(uuid.uuid4()), image_path=image_path)
+        # `preferred_id` lets a caller re-hydrate a specific, already-known
+        # analysis_id (e.g. one recorded in history whose in-memory run was
+        # evicted or never existed) instead of minting a fresh one. Ordinary
+        # fresh-upload callers never pass it, so this is additive: the digest
+        # cache is still what decides whether real inference happens again.
+        state = RunState(
+            digest=digest, analysis_id=preferred_id or str(uuid.uuid4()), image_path=image_path
+        )
         self._runs[digest] = state
         self._by_id[state.analysis_id] = digest
         while len(self._runs) > self._cache_size:
@@ -629,12 +636,16 @@ class Orchestrator:
         image = self._image(state)
         out = {}
         seeds = state.stages["detect"].value
-        for seed in seeds:
-            crop = self.pipeline.crop_seed(image, seed["bbox"])
-            # len(seeds) is the whole scene's object count, which the foreign-object
-            # gate needs to decide whether this image is one it was calibrated on.
-            variety, quality, foreign = self.pipeline.classify_unified_full(
-                crop, scene_objects=len(seeds))
+        # Phase 21: one batched forward pass for the whole scene instead of one
+        # per seed. classify_unified_full_batch reconstructs each seed's
+        # (variety, quality, foreign_object) with the exact same per-item logic
+        # classify_unified_full uses -- see its docstring for why eval() mode
+        # makes this numerically identical, not just faster.
+        crops = [self.pipeline.crop_seed(image, seed["bbox"]) for seed in seeds]
+        # len(seeds) is the whole scene's object count, which the foreign-object
+        # gate needs to decide whether this image is one it was calibrated on.
+        results = self.pipeline.classify_unified_full_batch(crops, scene_objects=len(seeds))
+        for seed, (variety, quality, foreign) in zip(seeds, results):
             out[seed["seed_index"]] = {
                 "variety_prediction": variety,
                 "quality_prediction": quality,
@@ -1201,12 +1212,18 @@ class Orchestrator:
         Passing the id alone is the zero-inference path: every stage comes back
         reused, which is what makes a follow-up question cheap rather than a
         second full analysis.
+
+        Passing BOTH re-hydrates a specific analysis_id that fell out of the
+        in-memory cache (process restart, LRU eviction, or an id recorded by a
+        caller that ran detection some other way) onto a real re-run of the same
+        stored image -- genuine inference again, on the same file, never a
+        fabricated reuse of an answer that isn't actually cached.
         """
         routing = resolve_intent(question, intent)
         chosen = INTENTS_BY_NAME[routing["resolved"]]
 
         if image_path is not None:
-            state = self._state_for(image_path)
+            state = self._state_for(image_path, preferred_id=analysis_id)
         elif analysis_id is not None:
             state = self.state_by_id(analysis_id)
             if state is None:

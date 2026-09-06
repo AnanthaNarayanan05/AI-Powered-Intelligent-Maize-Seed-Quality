@@ -350,6 +350,39 @@ def test_an_unknown_analysis_id_is_refused_rather_than_answered_emptily():
 
 
 @needs_image
+def test_a_known_id_with_no_live_cache_entry_re_hydrates_onto_the_same_image():
+    """A fresh Orchestrator has never seen this id -- process restart, LRU
+    eviction, or an id recorded by a caller that skipped the orchestrator
+    entirely are all the same situation from here. Passing the image back
+    alongside the id must re-run real detection under that SAME id rather than
+    silently minting a new one or refusing a question history says it can
+    answer."""
+    orchestrator = Orchestrator()
+    result = orchestrator.run(
+        image_path=UPLOADS[0], analysis_id="a-known-but-uncached-id", question="Analyze these seeds"
+    )
+    assert result["analysis_id"] == "a-known-but-uncached-id"
+    assert "detect" in result["executed"]
+
+    # And it is now a real cache hit: a pure id follow-up costs no inference.
+    follow_up = orchestrator.run(analysis_id="a-known-but-uncached-id", question="Explain this result")
+    assert follow_up["executed"] == []
+
+
+@needs_image
+def test_re_hydrating_a_live_cached_digest_keeps_its_real_owning_id():
+    """If the same image is already live in the cache under its own id, a
+    mismatched preferred_id must never hijack it -- the digest, not the
+    caller's hint, decides which run this is."""
+    orchestrator = Orchestrator()
+    first = orchestrator.run(image_path=UPLOADS[0], question="Analyze these seeds")
+    again = orchestrator.run(
+        image_path=UPLOADS[0], analysis_id="a-different-id-entirely", question="Explain this result"
+    )
+    assert again["analysis_id"] == first["analysis_id"]
+
+
+@needs_image
 def test_a_seed_carries_a_measurement_but_no_placeholder_grade(run):
     """An absent field means the stage that fills it did not run, and the stage
     report says which. No default class, no zero confidence."""
