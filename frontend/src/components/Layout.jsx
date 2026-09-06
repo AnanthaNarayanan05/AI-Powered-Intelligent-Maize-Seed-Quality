@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Navigate, Outlet, useLocation } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   LayoutGrid,
@@ -10,11 +10,13 @@ import {
   ClipboardList,
   Sparkles,
   Cpu,
+  SlidersHorizontal,
   Menu,
   X,
 } from "lucide-react";
 import { api } from "../api/client";
 import { usePrefersReducedMotion } from "../hooks/usePrefersReducedMotion";
+import { useSettings } from "../lib/settings";
 import { StatusPill } from "./ui";
 import "./layout.css";
 
@@ -27,6 +29,7 @@ const NAV = [
   { to: "/lot", label: "Seed Lot", icon: ClipboardList },
   { to: "/copilot", label: "AI Copilot", icon: Sparkles },
   { to: "/system", label: "System", icon: Cpu },
+  { to: "/settings", label: "Settings", icon: SlidersHorizontal },
 ];
 
 export default function Layout() {
@@ -37,6 +40,19 @@ export default function Layout() {
   const [videoFailed, setVideoFailed] = useState(false);
   const videoRef = useRef(null);
   const isOverview = location.pathname === "/";
+
+  // The landing-page preference applies to opening the app, not to navigating
+  // inside it: clicking "Overview" afterwards must reach Overview, or the nav
+  // item is unreachable. So it is decided once, from the URL the browser was
+  // actually opened at, and cleared on mount. It is state rather than a ref
+  // written during render — a ref mutated mid-render is undone by StrictMode's
+  // second pass, which silently swallowed the redirect.
+  const { settings } = useSettings();
+  const [landingPending, setLandingPending] = useState(
+    () => settings.landingPage !== "/" && window.location.pathname === "/"
+  );
+  useEffect(() => setLandingPending(false), []);
+  const redirectTo = landingPending ? settings.landingPage : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +90,8 @@ export default function Layout() {
     health.state === "ok" ? "Online" : health.state === "loading" ? "Checking" : "Offline";
   const geminiTone = health.gemini_configured ? "ai" : "warn";
   const geminiLabel = health.gemini_configured ? "Connected" : "Not configured";
+
+  if (redirectTo) return <Navigate to={redirectTo} replace />;
 
   return (
     <div className="shell">

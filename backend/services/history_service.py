@@ -10,9 +10,12 @@ limitation rather than as a missing value that later reads like an oversight.
 """
 from __future__ import annotations
 
+import csv
 import datetime
 import hashlib
+import io
 import os
+import re
 
 from database.db import session_scope
 from database.models import (
@@ -259,6 +262,11 @@ def save_analysis_result(result: dict, variety_dataset: str, image_filename: str
                     predicted_class=vp["predicted_class"],
                     confidence=vp["confidence"], class_probabilities=vp["class_probabilities"],
                     is_synthetic_model=0,
+                    # Phase 17. .get(), not [], because a row written before this
+                    # field existed has no key to read -- None is the honest value
+                    # for "nobody recorded whether this one was calibrated",
+                    # distinct from False ("measured and found uncalibrated").
+                    confidence_calibrated=vp.get("confidence_calibrated"),
                 ))
             if seed.get("quality_prediction"):
                 qp = seed["quality_prediction"]
@@ -278,6 +286,7 @@ def save_analysis_result(result: dict, variety_dataset: str, image_filename: str
                     predicted_class=qp["predicted_class"],
                     confidence=qp["confidence"], class_probabilities=probs,
                     is_synthetic_model=0,
+                    confidence_calibrated=qp.get("confidence_calibrated"),
                 ))
             if seed.get("synthetic_defect_prediction"):
                 sp = seed["synthetic_defect_prediction"]
@@ -345,6 +354,10 @@ def _serialize_analysis(analysis: Analysis) -> dict:
                 "predicted_class": c.predicted_class, "confidence": c.confidence,
                 "class_probabilities": c.class_probabilities,
                 "is_synthetic_model": bool(c.is_synthetic_model),
+                # Phase 17. None survives as None here (not coerced to False): a
+                # row from before calibration existed must keep reading as
+                # "never measured", the same distinction the column itself keeps.
+                "confidence_calibrated": c.confidence_calibrated,
             }
             for c in analysis.classifications
         ],
@@ -395,6 +408,75 @@ def save_batch_result(batch_id: str, total: int, successful: int, failed: int, s
             id=batch_id, total_images=total, successful_images=successful,
             failed_images=failed, aggregate_stats=stats, analysis_ids=analysis_ids,
         ))
+
+
+def delete_analysis(analysis_id: str) -> bool:
+    """Hard-deletes one analysis and everything the cascade in database/models.py
+    owns for it (detections, classifications, similarities, segmentations,
+    assessments). Returns False rather than raising when there is no such row,
+    so the caller can tell "nothing to delete" apart from "deleted".
+
+    Deliberately does not touch the uploaded file at `image_path` on disk: a
+    history row and the bytes it points at are two different things to own, and
+    deleting a file a moment after deleting the row that named it is a second,
+    separate destructive action this function does not take silently.
+    """
+    with session_scope() as db:
+        analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+        if analysis is None:
+            return False
+        db.delete(analysis)
+        return True
+
+
+_QUALITY_MODEL_RE = re.compile(r"(quality|defect)", re.IGNORECASE)
+
+
+def _is_quality_row(c: Classification) -> bool:
+    return not c.is_synthetic_model and bool(_QUALITY_MODEL_RE.search(c.model_name or ""))
+
+
+def _is_variety_row(c: Classification) -> bool:
+    return not c.is_synthetic_model and not _QUALITY_MODEL_RE.search(c.model_name or "")
+
+
+_EXPORT_COLUMNS = [
+    "analysis_id", "created_at", "image_filename", "seed_count",
+    "variety_dataset_used", "analysis_stage", "intent",
+    "top_variety", "top_variety_confidence",
+    "quality_grade", "quality_confidence",
+]
+
+
+def export_history_csv() -> str:
+    """One row per analysis, summarising the same fields the History page's card
+    view already shows for it -- not a per-seed dump. A multi-seed batch analysis
+    reports only its first matching seed's variety/quality here, exactly the
+    simplification History.jsx's card view already makes; the full per-seed
+    detail remains available one row at a time from GET /api/history/{id}.
+    """
+    with session_scope() as db:
+        rows = db.query(Analysis).order_by(Analysis.created_at.desc()).all()
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(_EXPORT_COLUMNS)
+        for a in rows:
+            variety = next((c for c in a.classifications if _is_variety_row(c)), None)
+            quality = next((c for c in a.classifications if _is_quality_row(c)), None)
+            writer.writerow([
+                a.id,
+                _iso_utc(a.created_at) or "",
+                a.image_filename or "",
+                a.seed_count,
+                a.variety_dataset_used or "",
+                a.analysis_stage or "",
+                a.intent or "",
+                variety.predicted_class if variety else "",
+                f"{variety.confidence:.4f}" if variety and variety.confidence is not None else "",
+                quality.predicted_class if quality else "",
+                f"{quality.confidence:.4f}" if quality and quality.confidence is not None else "",
+            ])
+        return buf.getvalue()
 
 
 def get_batch(batch_id: str) -> dict | None:

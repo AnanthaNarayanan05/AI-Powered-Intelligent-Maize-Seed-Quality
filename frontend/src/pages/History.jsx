@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Search, ChevronLeft, ChevronRight, Clock, X } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, Clock, Download, Trash2, X } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import { foreignFlag, isQualityRow, isVarietyRow, seedHealth } from "../lib/seedHealth";
 import {
@@ -50,12 +50,17 @@ function buildDetectionSeeds(analysis) {
       kernel_px: d.kernel_px,
       detection_confidence: d.confidence,
       variety_prediction: variety
-        ? { predicted_class: variety.predicted_class, confidence: variety.confidence }
+        ? {
+            predicted_class: variety.predicted_class,
+            confidence: variety.confidence,
+            confidence_calibrated: variety.confidence_calibrated,
+          }
         : null,
       quality_prediction: quality
         ? {
             predicted_class: quality.predicted_class,
             confidence: quality.confidence,
+            confidence_calibrated: quality.confidence_calibrated,
             out_of_distribution: !!quality.class_probabilities?._out_of_distribution,
           }
         : null,
@@ -88,7 +93,12 @@ function SeedDetail({ seed }) {
           {seed.variety_prediction ? pretty(seed.variety_prediction.predicted_class) : "No variety prediction"}
         </span>
         {seed.variety_prediction && (
-          <ConfidenceBar value={seed.variety_prediction.confidence} showValue label={null} />
+          <ConfidenceBar
+            value={seed.variety_prediction.confidence}
+            calibrated={seed.variety_prediction.confidence_calibrated}
+            showValue
+            label={null}
+          />
         )}
       </div>
       {seed.quality_prediction && (
@@ -96,7 +106,12 @@ function SeedDetail({ seed }) {
           <span className={`hcard__seedval ${health.flagged ? "hcard__seedval--warn" : ""}`}>
             {pretty(seed.quality_prediction.predicted_class)}
           </span>
-          <ConfidenceBar value={seed.quality_prediction.confidence} showValue label={null} />
+          <ConfidenceBar
+            value={seed.quality_prediction.confidence}
+            calibrated={seed.quality_prediction.confidence_calibrated}
+            showValue
+            label={null}
+          />
         </div>
       )}
     </div>
@@ -112,6 +127,9 @@ export default function History() {
   const [variety, setVariety] = useState("all");
   const [selected, setSelected] = useState(null);
   const [seedSel, setSeedSel] = useState(null);
+  const [deletePending, setDeletePending] = useState(null); // analysis_id awaiting confirmation
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +161,21 @@ export default function History() {
     );
     return [...set].sort();
   }, [rows]);
+
+  const handleDelete = async (analysisId) => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.deleteAnalysis(analysisId);
+      setRows((prev) => prev.filter((r) => r.analysis_id !== analysisId));
+      setDeletePending(null);
+      if (selected === analysisId) setSelected(null);
+    } catch (e) {
+      setDeleteError(e.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const filtered = rows.filter((r) => {
     const top = (r.classifications || []).find(isVarietyRow);
@@ -212,7 +245,23 @@ export default function History() {
             Next <ChevronRight size={14} />
           </Button>
         </div>
+
+        {/* A plain download link, not a fetch call: the browser's own download
+            flow handles a CSV response exactly like any other file. */}
+        <a
+          className="btn btn--secondary btn--sm hi__export"
+          href={api.historyExportUrl()}
+          download="maize_analysis_history.csv"
+        >
+          <Download size={14} /> Export CSV
+        </a>
       </GlassCard>
+
+      {deleteError && (
+        <GlassCard accent="danger" className="hi__deleteerr">
+          <ErrorState title="Could not delete analysis" reason={deleteError} />
+        </GlassCard>
+      )}
 
       {state === "loading" && (
         <div className="hi__grid">
@@ -293,7 +342,12 @@ export default function History() {
                   {top ? (
                     <>
                       <span className="hcard__variety">{pretty(top.predicted_class)}</span>
-                      <ConfidenceBar value={top.confidence} showValue label={null} />
+                      <ConfidenceBar
+                        value={top.confidence}
+                        calibrated={top.confidence_calibrated}
+                        showValue
+                        label={null}
+                      />
                     </>
                   ) : (
                     <span className="hcard__variety faint">No variety prediction</span>
@@ -315,6 +369,36 @@ export default function History() {
                         </div>
                       ))}
                       <span className="hcard__id mono faint">{r.analysis_id}</span>
+
+                      <div className="hcard__deletebar">
+                        {deletePending === r.analysis_id ? (
+                          <>
+                            <span className="hcard__deleteconfirm">
+                              Permanently delete this analysis and its stored results?
+                            </span>
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              onClick={() => handleDelete(r.analysis_id)}
+                              disabled={deleting}
+                            >
+                              {deleting ? "Deleting…" : "Confirm delete"}
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => setDeletePending(null)} disabled={deleting}>
+                              Cancel
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            icon={Trash2}
+                            onClick={() => setDeletePending(r.analysis_id)}
+                          >
+                            Delete this analysis
+                          </Button>
+                        )}
+                      </div>
 
                       {detSeeds.length > 0 && r.image_path && (
                         <div className="hcard__seeds-drilldown">

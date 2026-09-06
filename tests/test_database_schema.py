@@ -25,7 +25,8 @@ from database.models import (
     STAGE_ORDER, Analysis, Base, Classification, Detection, SeedAssessment, SeedSegmentation,
 )
 from backend.services.history_service import (
-    _derive_stage, _model_version, get_analysis, save_analysis_result,
+    _derive_stage, _model_version, delete_analysis, export_history_csv,
+    get_analysis, save_analysis_result,
 )
 
 
@@ -93,7 +94,8 @@ def test_additive_migration_adds_columns_without_touching_rows(tmp_path):
     assert {"analysis_stage", "intent", "stages", "model_versions",
             "segmentation_status", "image_path"} <= columns
     assert "kernel_px" in {c["name"] for c in inspect(engine).get_columns("detections")}
-    assert "model_version" in {c["name"] for c in inspect(engine).get_columns("classifications")}
+    classification_cols = {c["name"] for c in inspect(engine).get_columns("classifications")}
+    assert {"model_version", "confidence_calibrated"} <= classification_cols
 
     con = sqlite3.connect(path)
     assert con.execute("SELECT COUNT(*) FROM analyses").fetchone()[0] == 2
@@ -354,3 +356,119 @@ def test_rows_written_before_phase_9_read_back_as_unknown(temp_db):
     assert stored["detections"][0]["kernel_px"] is None
     assert stored["classifications"][0]["model_version"] is None
     assert stored["segmentations"] == [] and stored["assessments"] == []
+    assert stored["classifications"][0]["confidence_calibrated"] is None
+
+
+# ------------------------------------------------------------ calibration flag
+def test_confidence_calibrated_round_trips_true_and_false(temp_db):
+    """Phase 17: whichever of variety/quality a run's calibration accepted must
+    come back exactly as recorded per head, not collapsed to one flag for the
+    whole analysis."""
+    result = _result()
+    result["seeds"][0]["variety_prediction"]["confidence_calibrated"] = True
+    result["seeds"][0]["quality_prediction"]["confidence_calibrated"] = False
+    save_analysis_result(result, variety_dataset="a", image_filename="x.jpg")
+    stored = get_analysis("a1")
+    by_model = {c["model_name"]: c for c in stored["classifications"]}
+    assert by_model["unified_seed_model"]["confidence_calibrated"] is True
+    assert by_model["unified_seed_model_quality"]["confidence_calibrated"] is False
+
+
+def test_confidence_calibrated_is_unknown_not_false_when_never_recorded(temp_db):
+    """_result() carries no confidence_calibrated key at all -- the shape every
+    analysis written before Phase 17 has. That must read back as None, the same
+    'nobody measured this' value the rest of this file already defends for
+    kernel_px and model_version."""
+    save_analysis_result(_result(), variety_dataset="a", image_filename="x.jpg")
+    stored = get_analysis("a1")
+    for c in stored["classifications"]:
+        assert c["confidence_calibrated"] is None
+
+
+# ------------------------------------------------------------ delete / export
+def test_deleting_an_analysis_removes_its_children_too(temp_db):
+    """The cascade in database/models.py is the thing under test here, not just
+    the row deletion API on top of it."""
+    save_analysis_result(_result(), variety_dataset="a")
+    assert delete_analysis("a1") is True
+    assert get_analysis("a1") is None
+    with dbmod.session_scope() as db:
+        assert db.query(Detection).filter(Detection.analysis_id == "a1").count() == 0
+        assert db.query(Classification).filter(Classification.analysis_id == "a1").count() == 0
+
+
+def test_deleting_an_unknown_analysis_id_reports_nothing_to_delete(temp_db):
+    assert delete_analysis("does-not-exist") is False
+
+
+def test_csv_export_carries_one_row_per_analysis_with_its_top_classifications(temp_db):
+    save_analysis_result(_result(analysis_id="a1"), variety_dataset="a", image_filename="k1.jpg")
+    save_analysis_result(_result(analysis_id="a2"), variety_dataset="a", image_filename="k2.jpg")
+    csv_text = export_history_csv()
+    lines = csv_text.strip().splitlines()
+    assert lines[0] == (
+        "analysis_id,created_at,image_filename,seed_count,variety_dataset_used,"
+        "analysis_stage,intent,top_variety,top_variety_confidence,quality_grade,quality_confidence"
+    )
+    # Newest first, same ordering list_analyses already uses.
+    assert lines[1].startswith("a2,")
+    body = "\n".join(lines[1:])
+    assert "Indurata" in body and "Good" in body
+    assert "k1.jpg" in body and "k2.jpg" in body
+
+
+def test_csv_export_is_empty_but_headed_with_no_history(temp_db):
+    csv_text = export_history_csv()
+    lines = csv_text.strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("analysis_id,")
+
+
+# --------------------------------------------------- HTTP layer (Phase 7's routes)
+# The tests above cover the service functions the routes call; these confirm the
+# routes themselves -- status codes, the JSON/CSV shape a client actually receives,
+# and the ordering that keeps "/history/export" from being swallowed by the
+# "/history/{analysis_id}" dynamic segment. Uses temp_db so no request here can
+# ever touch the real database/app.db -- session_scope() re-reads the module-level
+# engine on every call, so monkeypatching it before each request is enough to
+# retarget the live FastAPI app at the throwaway file for the duration of the test.
+def test_delete_route_deletes_once_then_reports_404(temp_db):
+    from fastapi.testclient import TestClient
+    from backend.main import app
+
+    save_analysis_result(_result(), variety_dataset="a")
+    client = TestClient(app)
+
+    r = client.delete("/api/history/a1")
+    assert r.status_code == 200
+    assert r.json() == {"deleted": True, "analysis_id": "a1"}
+
+    assert client.get("/api/history/a1").status_code == 404
+    # Deleting the same id again finds nothing left to delete.
+    assert client.delete("/api/history/a1").status_code == 404
+
+
+def test_delete_route_404s_for_an_id_that_was_never_stored(temp_db):
+    from fastapi.testclient import TestClient
+    from backend.main import app
+
+    client = TestClient(app)
+    r = client.delete("/api/history/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_export_route_serves_a_downloadable_csv_not_swallowed_by_the_id_route(temp_db):
+    from fastapi.testclient import TestClient
+    from backend.main import app
+
+    save_analysis_result(_result(analysis_id="a1"), variety_dataset="a", image_filename="k1.jpg")
+    client = TestClient(app)
+
+    r = client.get("/api/history/export")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert 'attachment; filename="maize_analysis_history.csv"' in r.headers["content-disposition"] \
+        or "attachment; filename=maize_analysis_history.csv" in r.headers["content-disposition"]
+    lines = r.text.strip().splitlines()
+    assert lines[0].startswith("analysis_id,")
+    assert "k1.jpg" in r.text and "Indurata" in r.text
