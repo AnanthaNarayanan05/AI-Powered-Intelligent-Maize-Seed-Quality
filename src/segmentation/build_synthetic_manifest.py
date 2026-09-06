@@ -30,7 +30,7 @@ from pathlib import Path
 
 import cv2
 
-from src.data.group_split import split_groups
+from src.data.group_split import content_key, split_groups
 from src.data.synthetic_defect_generator import (
     SYNTHETIC_CLASSES,
     _seed_foreground_mask,
@@ -66,14 +66,27 @@ def build(
 
     sources = sorted({r["source_image"] for r in rows})
     variety_of = {r["source_image"]: r["source_variety_class"] for r in rows}
-    assignment = split_groups(
-        sources,
-        group_of=lambda s: s,
-        label_of=lambda s: variety_of[s],
+    # Group by CONTENT, not path. Dataset A carries 4 exact-duplicate pairs
+    # (docs/03_DATASET_AUDIT.md); two source images with different filenames but
+    # identical bytes are the same physical seed, and splitting one into train while
+    # its byte-identical twin lands in test reintroduces exactly the leakage
+    # group-aware splitting exists to prevent (data_audit found this: 2 duplicate
+    # pairs previously spanned train/test and train/val here). content_key() is the
+    # same md5-of-bytes collapse src/data/group_split.py already uses for Dataset 4.
+    content_of = {s: content_key(s) for s in sources}
+    content_groups = sorted(set(content_of.values()))
+    content_label = {}
+    for s in sources:
+        content_label.setdefault(content_of[s], variety_of[s])
+    content_assignment = split_groups(
+        content_groups,
+        group_of=lambda c: c,
+        label_of=lambda c: content_label[c],
         val_frac=val_frac,
         test_frac=test_frac,
         seed=seed,
     )
+    assignment = {s: content_assignment[content_of[s]] for s in sources}
 
     body_dir = Path(body_root)
     body_dir.mkdir(parents=True, exist_ok=True)
