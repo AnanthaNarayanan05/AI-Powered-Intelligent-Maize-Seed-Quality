@@ -125,6 +125,21 @@ def test_system_info_runtime_and_database_are_probed():
         assert all(isinstance(v, int) for v in db["tables"].values())
 
 
+def test_system_info_reports_detection_config_from_the_file_it_runs_on():
+    """The Settings page shows these as read-only model configuration, so they have
+    to be the values this server loaded rather than numbers typed into a page. They
+    are also declared non-adjustable: the pipeline is a singleton, bound at first
+    load, and each threshold was chosen against a measurement in docs/09."""
+    from src.utils.config import load_config
+
+    inference = client.get("/api/system-info").json()["inference"]
+    assert inference["adjustable_at_runtime"] is False
+
+    expected = load_config()["detection"]
+    for key in ("conf_threshold", "nms_iou", "crop_context_pad", "iou_threshold"):
+        assert inference["detection"][key] == expected[key]
+
+
 def test_system_info_binds_each_gallery_to_the_encoder_that_built_it():
     """Phase 13 provenance has to be visible on the page, not only in the sidecar."""
     for idx in client.get("/api/system-info").json()["similarity_indices"]:

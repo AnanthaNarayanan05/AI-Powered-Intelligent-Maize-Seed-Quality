@@ -189,6 +189,32 @@ def _runtime() -> dict:
     return info
 
 
+def _inference(cfg: dict) -> dict:
+    """The detection parameters this server is actually running with.
+
+    Read from configs/config.yaml at request time for the same reason every other
+    section is: a copy written down elsewhere describes the config that was true
+    when it was written. Reported as read-only, and the flag says so rather than
+    leaving a client to assume: the pipeline is a process-level singleton, so
+    these are bound at first load and a request cannot change them. Each value
+    was chosen against a measurement recorded in docs/09; a UI control that let
+    them be nudged per-request would be a control over inference correctness.
+    """
+    d = cfg.get("detection") or {}
+    return {
+        "adjustable_at_runtime": False,
+        "detection": {
+            "framework": d.get("framework"),
+            "model": d.get("model"),
+            "image_size": d.get("image_size"),
+            "conf_threshold": d.get("conf_threshold"),
+            "nms_iou": d.get("nms_iou"),
+            "crop_context_pad": d.get("crop_context_pad"),
+            "iou_threshold": d.get("iou_threshold"),
+        },
+    }
+
+
 def _database(cfg: dict) -> dict:
     path = cfg["paths"]["database"]
     out = {
@@ -278,6 +304,7 @@ def system_report() -> dict:
         "runtime": _runtime(),
         "models": _models(),
         "similarity_indices": _similarity_indices(cfg),
+        "inference": _inference(cfg),
         "database": _database(cfg),
         # Name of the selected model only. The key itself never leaves the server.
         "gemini": {"configured": configured, "model": GEMINI_MODEL},
