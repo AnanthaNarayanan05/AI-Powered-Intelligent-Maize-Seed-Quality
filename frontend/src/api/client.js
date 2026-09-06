@@ -31,10 +31,14 @@ export const api = {
   stats: () => fetch(`${BASE_URL}/api/stats`).then(handle),
   trainingScale: () => fetch(`${BASE_URL}/api/training-scale`).then(handle),
 
-  analyzeImage: (file, varietyDataset = "a") => {
+  // `runSimilarity` mirrors the endpoint's own default. Sent explicitly so the
+  // Settings preference is what decides it, rather than the server's default
+  // deciding it whenever the caller stays quiet.
+  analyzeImage: (file, varietyDataset = "a", { runSimilarity = true } = {}) => {
     const form = new FormData();
     form.append("file", file);
     form.append("variety_dataset", varietyDataset);
+    form.append("run_similarity", String(runSimilarity));
     return fetch(`${BASE_URL}/api/analyze/image`, { method: "POST", body: form }).then(handle);
   },
 
@@ -99,6 +103,29 @@ export const api = {
   historyDetail: (analysisId) => fetch(`${BASE_URL}/api/history/${analysisId}`).then(handle),
 
   batchDetail: (batchId) => fetch(`${BASE_URL}/api/history/batch/${batchId}`).then(handle),
+
+  deleteAnalysis: (analysisId) =>
+    fetch(`${BASE_URL}/api/history/${analysisId}`, { method: "DELETE" }).then(handle),
+
+  // A direct URL rather than a fetch wrapper: the caller navigates the browser
+  // to it (or sets it as a link's href) so the browser's own download flow
+  // handles the file, exactly like mediaUrl above.
+  historyExportUrl: () => `${BASE_URL}/api/history/export`,
+
+  // The orchestrator's OWN answer -- no language model involved. Reuses the cached
+  // analysis (no file re-upload, no re-inference) and returns the stage-by-stage
+  // account plus the intent-specific answer object, exactly what
+  // src/pipeline/orchestrator.py.run() returns. Kept as a distinct call from
+  // copilotChat below: this is the pipeline explaining itself, not Gemini
+  // explaining the pipeline.
+  askOrchestrator: (analysisId, { question = null, intent = null, topK = 5 } = {}) => {
+    const form = new FormData();
+    form.append("analysis_id", analysisId);
+    if (question) form.append("question", question);
+    if (intent) form.append("intent", intent);
+    form.append("top_k", String(topK));
+    return fetch(`${BASE_URL}/api/analyze/ask`, { method: "POST", body: form }).then(handle);
+  },
 
   copilotChat: (analysisId, question) =>
     fetch(`${BASE_URL}/api/copilot/chat`, {
