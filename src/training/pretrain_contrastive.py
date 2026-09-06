@@ -26,9 +26,12 @@ logger = get_logger("pretrain_contrastive")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", choices=["a", "b", "unified"], required=True,
+    parser.add_argument("--dataset", choices=["a", "b", "unified", "quality"], required=True,
                          help="'unified' pools every dataset's TRAIN rows via --manifest; "
-                              "it has no data_root of its own and requires --manifest.")
+                              "it has no data_root of its own and requires --manifest. "
+                              "'quality' is the Mendeley EfficientMaize set (docs/09 sec "
+                              "6.7 item 3's quality-head ablation) and also requires "
+                              "--manifest, for the same reason.")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--pretrained", dest="pretrained", action="store_true", default=True)
@@ -49,10 +52,11 @@ def main():
     device = get_device(cfg["device"]["prefer"])
     logger.info(f"Device: {device}")
 
-    if args.dataset == "unified" and not args.manifest:
-        raise SystemExit("--dataset unified requires --manifest")
+    if args.dataset in ("unified", "quality") and not args.manifest:
+        raise SystemExit(f"--dataset {args.dataset} requires --manifest")
     data_root = (cfg["paths"]["dataset_a"] if args.dataset == "a"
-                 else cfg["paths"]["dataset_b"] if args.dataset == "b" else None)
+                 else cfg["paths"]["dataset_b"] if args.dataset == "b"
+                 else cfg["paths"].get("dataset_quality") if args.dataset == "quality" else None)
     image_size = cfg["training"]["image_size"]
     epochs = args.epochs or cfg["contrastive"]["pretrain_epochs"]
     batch_size = args.batch_size or cfg["contrastive"]["pretrain_batch_size"]

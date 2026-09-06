@@ -11,6 +11,7 @@ paths:
   dataset_a: datasets/dataset_variety_a_corntype/Corn_3_Classes_Image_Dataset
   dataset_b: datasets/dataset_2_variety/MaizeData
   dataset_c: datasets/dataset_3_detection
+  dataset_quality: datasets/dataset_4_quality/EfficientMaize
   processed: data_processed
   checkpoints: outputs/checkpoints
   logs: outputs/logs
@@ -38,6 +39,17 @@ dataset_c:
   name: grain_and_objects_detection
   classes: [Corn]
   num_images: 1251
+
+# Mendeley EfficientMaize, the same real expert Good/Bad kernel labels the
+# unified model's quality head trains on (docs/09 sec 1.3/4). Added so the
+# quality-head 4-way ablation (docs/09 sec 6.7 item 3) can reuse
+# train_variety.py / pretrain_contrastive.py / ablation_significance.py's
+# machinery unmodified in structure, same as dataset_a/dataset_b.
+dataset_quality:
+  name: efficient_maize_quality
+  classes: [Good, Bad]
+  image_size: 224
+  num_images: 4846
 
 training:
   image_size: 224

@@ -73,7 +73,10 @@ def evaluate(model, loader, device, classes):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", choices=["a", "b"], required=True)
+    parser.add_argument("--dataset", choices=["a", "b", "quality"], required=True,
+                         help="'quality' is the Mendeley EfficientMaize Good/Bad set, used "
+                              "for the quality-head ablation (docs/09 sec 6.7 item 3) with "
+                              "the same 4-experiment machinery as a/b.")
     parser.add_argument("--experiment", choices=list(EXPERIMENTS.keys()), default="full")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--pretrained", dest="pretrained", action="store_true", default=True)
@@ -98,9 +101,12 @@ def main():
     logger.info(f"Device: {device} | dataset={args.dataset} | experiment={args.experiment}")
 
     exp_cfg = EXPERIMENTS[args.experiment]
-    ds_cfg = cfg["dataset_a"] if args.dataset == "a" else cfg["dataset_b"]
+    ds_cfg = (cfg["dataset_a"] if args.dataset == "a"
+              else cfg["dataset_b"] if args.dataset == "b" else cfg["dataset_quality"])
     classes = ds_cfg["classes"]
-    data_root = cfg["paths"]["dataset_a"] if args.dataset == "a" else cfg["paths"]["dataset_b"]
+    data_root = (cfg["paths"]["dataset_a"] if args.dataset == "a"
+                 else cfg["paths"]["dataset_b"] if args.dataset == "b"
+                 else cfg["paths"]["dataset_quality"])
 
     tag = args.tag or args.experiment
     manifest_path = args.manifest or os.path.join(
