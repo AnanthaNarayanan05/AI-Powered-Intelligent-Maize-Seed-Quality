@@ -9,7 +9,7 @@ see [`docs/`](docs/) for the full audit trail before reading any code.
 
 <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=15&duration=3200&pause=1200&color=2B2620&center=true&vCenter=true&width=780&height=50&lines=Two-head%20model%3A%20variety%20(6-way)%20%2B%20quality%20(Good%20%2F%20Bad);97.25%25%20quality%20accuracy%20--%20gated%20by%20representation%20distance%2C%20not%20raw%20confidence;Tested%20with%20paired%20Wilcoxon%20%2B%20Holm%20correction%2C%20n%3D19%20seeds%20--%20not%20vibes" alt="rotating project facts" />
 
-![status](https://img.shields.io/badge/status-complete-2E7D32?style=flat-square) ![tests](https://img.shields.io/badge/tests-40%20passed-2E7D32?style=flat-square&logo=pytest&logoColor=white) ![python](https://img.shields.io/badge/python-3.11-C68A1B?style=flat-square&logo=python&logoColor=white) ![pytorch](https://img.shields.io/badge/PyTorch-%E2%89%A52.2-A6462A?style=flat-square&logo=pytorch&logoColor=white) ![react](https://img.shields.io/badge/React-19-1B4332?style=flat-square&logo=react&logoColor=white) ![fastapi](https://img.shields.io/badge/FastAPI-backend-0B6E4F?style=flat-square&logo=fastapi&logoColor=white)
+![status](https://img.shields.io/badge/status-complete-2E7D32?style=flat-square) ![tests](https://img.shields.io/badge/tests-244%20passed-2E7D32?style=flat-square&logo=pytest&logoColor=white) ![python](https://img.shields.io/badge/python-3.11-C68A1B?style=flat-square&logo=python&logoColor=white) ![pytorch](https://img.shields.io/badge/PyTorch-%E2%89%A52.2-A6462A?style=flat-square&logo=pytorch&logoColor=white) ![react](https://img.shields.io/badge/React-19-1B4332?style=flat-square&logo=react&logoColor=white) ![fastapi](https://img.shields.io/badge/FastAPI-backend-0B6E4F?style=flat-square&logo=fastapi&logoColor=white)
 
 </div>
 
@@ -19,6 +19,8 @@ see [`docs/`](docs/) for the full audit trail before reading any code.
 - [Status](#status)
 - [Headline result — read before citing any accuracy figure](#headline-result--read-before-citing-any-accuracy-figure)
 - [Key ground rule](#key-ground-rule)
+- [Since the headline result](#since-the-headline-result)
+- [Test suite](#test-suite)
 
 ---
 
@@ -48,9 +50,10 @@ The gate under the quality head is the part worth reading twice: softmax confide
 5. [`docs/05_ARCHITECTURE.md`](docs/05_ARCHITECTURE.md) — the final system architecture built from that evidence.
 
 ## Status
-**Complete.** All training has run on the local RTX 4060 — contrastive pretraining and the four-way ablation for both variety datasets, the group-aware Dataset B re-run, the unified two-head served model, YOLO seed detection, and both FAISS similarity indices. The full pipeline is verified end-to-end through the Python API, over HTTP, and through the live React frontend; `pytest tests/` reports **40 passed, 0 failed**.
+**Complete.** All training has run on the local RTX 4060 — contrastive pretraining and the four-way ablation across all three variety-bearing datasets, the group-aware Dataset B re-run, the unified two-head served model (now temperature-calibrated), YOLO seed detection, both FAISS similarity indices, a foreign-object review gate, and a visible-symptom classifier with its own abstention gate. The full pipeline is verified end-to-end through the Python API, over HTTP, and through the live React frontend; `pytest tests/` reports **244 passed, 0 failed**.
 
-- [`docs/09_PROJECT_STATUS_REPORT.md`](docs/09_PROJECT_STATUS_REPORT.md) — start here: results, caveats, and what they mean.
+- [`docs/09_PROJECT_STATUS_REPORT.md`](docs/09_PROJECT_STATUS_REPORT.md) — start here: results, caveats, and what they mean. §10.1 onward covers everything built after the headline result below.
+- [`docs/12_CONFIDENCE_CALIBRATION.md`](docs/12_CONFIDENCE_CALIBRATION.md) — why the confidence bars were hidden, how they were fixed, and the numbers behind the fix.
 - [`docs/11_LOCAL_TRAINING_RUN_LOG.md`](docs/11_LOCAL_TRAINING_RUN_LOG.md) — both training runs, every result, and the bugs they exposed.
 - [`docs/10_RESULTS_COMPARISON.md`](docs/10_RESULTS_COMPARISON.md) — the four-way ablation, leaked and corrected.
 - [`docs/07_RUNBOOK.md`](docs/07_RUNBOOK.md) — how to reproduce all of it from a clean clone.
@@ -85,6 +88,21 @@ Dataset A was checked for the same defect and is clean — zero test images have
 The bound matters as much as the number. Applied to Dataset A — imagery it was never trained on — the head calls **71% of a clean variety dataset defective at 89% mean confidence**. Softmax confidence does not detect this; it is *higher* on some out-of-distribution data than on real test data. The platform therefore gates quality on representation distance, catching 100% of Dataset A and 88% of dense-scene serve-time crops, and renders such grades as **unverified extrapolations** in visually distinct styling rather than as defects. The threshold is deliberately conservative — it withholds ~32% of in-distribution grades as unverified — because asserting a defect wrongly is worse than declining to grade.
 
 Still not supported, and listed as such in the UI: defect *type* classification, severity scoring (a confidence is not a severity), pixel-level segmentation, foreign-object identification, and fungal/insect/disease diagnosis — the last because published kernel-level fungal detection relies on NIR and hyperspectral bands an RGB camera cannot observe. See [`docs/04_FUNCTIONALITY_COVERAGE_MATRIX.md`](docs/04_FUNCTIONALITY_COVERAGE_MATRIX.md).
+
+## Since the headline result
+
+Everything below shipped after the ablation and quality-gate work above, closing the gaps that section left open. Full write-ups are in [`docs/09_PROJECT_STATUS_REPORT.md`](docs/09_PROJECT_STATUS_REPORT.md)'s later sections; nothing here changed a served checkpoint unless stated.
+
+- **Confidence is no longer hidden.** Both heads were softmax-overconfident (ECE up to several points), so the bars stayed off until they were fixed properly: temperature scaling fit on validation only, evaluated once on test (variety T=2.101, quality T=1.682). They're back on, showing the calibrated number, not the raw softmax. [`docs/12_CONFIDENCE_CALIBRATION.md`](docs/12_CONFIDENCE_CALIBRATION.md).
+- **The architecture choice was re-tested on a second task.** The attention+contrastive design that won on Dataset B was run again as a 4-way ablation on the *quality* head (Good/Bad, EfficientMaize). This time no variant differs significantly from any other (all six pairwise p > 0.05) — an honest null result, reported as one, that doesn't change the served model (docs/09 §10.11).
+- **The weakest variety class (SanzalSima, 60.6% recall) was investigated, not patched over.** Class-weighted and focal-loss retrains were both tried and both *failed* their own validation-only selection bar before test was ever touched, so the served model is unchanged. That corroborates the standing read — the class is genuinely visually ambiguous, not an artifact of the vanilla loss — rather than resolving it (docs/09 §10.12).
+- **Two more dataset searches came up honestly empty.** A sub-kernel defect-segmentation-mask search (docs/09 §10.7) and a maize-*kernel* disease/symptom search with lab-confirmed labels (docs/09 §10.13) each checked several public candidates against primary sources and rejected all of them — wrong modality, wrong organ (leaf, not kernel), or no ground-truth labels. The platform's `is_diagnosis: false` gate and its defect-segmentation abstention stand exactly where they were.
+- **Two capabilities exist now that didn't before:** a foreign-object review gate (`maize_identity_gate`) that ranks detector crops by how unlike known maize they look — a review aid, not a classifier, with a measured 51.8% end-to-end catch rate at its shipped review budget — and a visible-symptom classifier trained on real GrainSpace kernel labels, gated to only ever name one of five validated categories and to withhold the other 43.1% rather than guess. Neither claims a diagnosis.
+- **History is now a real feature, not a placeholder.** Past analyses can be exported to CSV or permanently deleted from the Settings page, backed by new routes and tests, where before both were explicitly listed as "not offered here."
+
+## Test suite
+
+`pytest tests/` — **244 passed, 0 failed**, covering every layer above: dataset/split integrity, the training scripts' loss functions, the pipeline's stage-by-stage abstention logic, the FastAPI routes (including the history export/delete pair above), and the orchestrator's caching. `npm run build` in [`frontend/`](frontend/) is clean.
 
 <div align="center">
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:1B4332,100:355E3B&height=90&section=footer&animation=fadeIn" width="100%" alt="" />
