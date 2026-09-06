@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 
+from src.registry.model_registry import checkpoint_sha256
 from src.utils.config import load_config
 from src.utils.logging_utils import get_logger
 
@@ -67,6 +68,9 @@ def main():
         "map50_95": float(metrics.box.map),
         "precision": float(metrics.box.mp),
         "recall": float(metrics.box.mr),
+        "checkpoint_sha256": checkpoint_sha256(
+            os.path.join(project_dir, "detection_corn", "weights", "best.pt")
+        ),
     }
     with open(os.path.join(cfg["paths"]["metrics"], "detection.json"), "w") as f:
         json.dump(summary, f, indent=2)

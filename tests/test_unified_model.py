@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import collections
 import csv
+import json
 import os
 
 import pytest
@@ -44,6 +45,15 @@ GROUPED_MANIFESTS = [
     "manifest_dataset_b_grouped.csv",
     "manifest_dataset_4_quality.csv",
     "manifest_unified.csv",
+    # Added by the Phase 28 data-quality audit (src/data/audit_manifests.py): every
+    # other manifest that declares a `group` column, not just the three the original
+    # Dataset B investigation touched. The invariant is the same one regardless of
+    # which model consumes the manifest.
+    "manifest_tritask.csv",
+    "manifest_symptom.csv",
+    "manifest_segmentation_real.csv",
+    "manifest_segmentation_synthetic.csv",
+    "manifest_unified_pretrain.csv",
 ]
 
 
@@ -280,6 +290,189 @@ def test_quality_head_is_not_labelled_synthetic():
     assert quality["is_synthetic_model"] is False
     assert variety["is_synthetic_model"] is False
     assert "expert-assigned" in quality["label_source"].lower()
+
+
+# --------------------------------------------------------------------------
+# Phase 21: batched inference must match the sequential path exactly
+# --------------------------------------------------------------------------
+
+@needs_unified
+def test_a_batch_of_crops_matches_calling_the_single_crop_method_on_each_one():
+    """classify_unified_full_batch exists purely for speed (see its docstring on
+    the GPU-idle-time bottleneck it removes); it must never be a second, slightly
+    different answer. eval() mode means BatchNorm reads fixed running statistics
+    regardless of how many images share the forward pass, so stacking crops into
+    one batch must reproduce, item for item, what the sequential single-crop
+    method already returns -- to within GPU floating-point tolerance (cuDNN may
+    pick a different reduction kernel for batch-of-1 vs batch-of-N, so this is
+    ~1e-3, not bit-for-bit) and with an identical predicted class every time.
+    This is the numerical-equivalence guarantee that lets Phase 9's performance
+    work touch inference code without becoming a silent behavior change."""
+    from PIL import Image
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    manifest = os.path.join(PROCESSED, "manifest_dataset_4_quality.csv")
+    if not os.path.exists(manifest):
+        pytest.skip("quality manifest not generated")
+    with open(manifest) as fh:
+        rows = [r for r in csv.DictReader(fh) if r["split"] == "test"]
+    if len(rows) < 5:
+        pytest.skip("not enough test rows for a meaningful batch")
+    sample = rows[:5]
+    crops = [Image.open(r["filepath"]).convert("RGB") for r in sample]
+
+    p = AnalysisPipeline()
+    sequential = [p.classify_unified_full(c, scene_objects=len(crops)) for c in crops]
+    batched = p.classify_unified_full_batch(crops, scene_objects=len(crops))
+
+    assert len(batched) == len(sequential)
+    for (seq_variety, seq_quality, seq_foreign), (bat_variety, bat_quality, bat_foreign) in zip(
+        sequential, batched
+    ):
+        assert bat_variety["predicted_class"] == seq_variety["predicted_class"]
+        assert bat_variety["confidence"] == pytest.approx(seq_variety["confidence"], abs=2e-3)
+        assert bat_quality["predicted_class"] == seq_quality["predicted_class"]
+        assert bat_quality["confidence"] == pytest.approx(seq_quality["confidence"], abs=2e-3)
+        if seq_quality.get("distribution_distance") is not None:
+            assert bat_quality["distribution_distance"] == pytest.approx(
+                seq_quality["distribution_distance"], abs=2e-3
+            )
+        assert bool(seq_foreign) == bool(bat_foreign)
+        if seq_foreign:
+            assert bat_foreign["status"] == seq_foreign["status"]
+            assert bat_foreign["atypicality"] == pytest.approx(seq_foreign["atypicality"], abs=2e-3)
+
+
+@needs_unified
+def test_batch_of_zero_crops_returns_empty_rather_than_erroring():
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    p = AnalysisPipeline()
+    assert p.classify_unified_full_batch([]) == []
+
+
+# --------------------------------------------------------------------------
+# Phase 17: confidence calibration must never be assumed, only verified
+# --------------------------------------------------------------------------
+
+def _isolated_pipeline(checkpoints_dir):
+    """An AnalysisPipeline whose _get_calibration looks in an empty scratch
+    directory instead of outputs/checkpoints/, so these tests control exactly
+    what unified_calibration.json says without touching the real one or
+    depending on whether this repo has run calibration yet. _checkpoint_for
+    still resolves through the real model_registry singleton (it does not read
+    cfg["paths"]), so model loading is unaffected by this override."""
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+
+    p = AnalysisPipeline()
+    p.cfg = dict(p.cfg)
+    p.cfg["paths"] = dict(p.cfg["paths"])
+    p.cfg["paths"]["checkpoints"] = str(checkpoints_dir)
+    return p
+
+
+@needs_unified
+def test_no_calibration_file_serves_raw_softmax_and_says_so(tmp_path):
+    p = _isolated_pipeline(tmp_path)
+    calibration = p._get_calibration()
+    assert calibration == {"variety": None, "quality": None}
+
+
+@needs_unified
+def test_a_calibration_file_naming_a_different_checkpoint_is_never_trusted(tmp_path):
+    """A stale calibration -- fit against a checkpoint that has since been
+    retrained -- must not go on dividing the new model's logits just because a
+    file with the right name exists. The hash is the only thing that says a
+    temperature still describes the model actually being served."""
+    (tmp_path / "unified_calibration.json").write_text(json.dumps({
+        "checkpoint_sha256": "0" * 64,
+        "variety": {"temperature": 2.5, "accepted_for_display": True},
+        "quality": {"temperature": 2.5, "accepted_for_display": True},
+    }))
+    p = _isolated_pipeline(tmp_path)
+    calibration = p._get_calibration()
+    assert calibration == {"variety": None, "quality": None}
+
+
+@needs_unified
+def test_a_calibration_not_accepted_for_display_is_not_applied_even_with_a_matching_hash(tmp_path):
+    """accepted_for_display is the ECE bar from calibrate_unified.py, not a
+    formality: a temperature that failed to bring a head's held-out ECE under
+    the stated threshold must not serve, even though it was fit against exactly
+    this checkpoint."""
+    from src.registry.model_registry import checkpoint_sha256
+
+    p = _isolated_pipeline(tmp_path)
+    live_hash = checkpoint_sha256(p._checkpoint_for("variety"))
+    (tmp_path / "unified_calibration.json").write_text(json.dumps({
+        "checkpoint_sha256": live_hash,
+        "variety": {"temperature": 2.5, "accepted_for_display": False},
+        "quality": {"temperature": 2.5, "accepted_for_display": True},
+    }))
+    calibration = p._get_calibration()
+    assert calibration["variety"] is None
+    assert calibration["quality"] == 2.5
+
+
+@needs_unified
+def test_a_calibration_matching_the_live_checkpoint_and_accepted_is_applied(tmp_path):
+    from src.registry.model_registry import checkpoint_sha256
+
+    p = _isolated_pipeline(tmp_path)
+    live_hash = checkpoint_sha256(p._checkpoint_for("variety"))
+    (tmp_path / "unified_calibration.json").write_text(json.dumps({
+        "checkpoint_sha256": live_hash,
+        "variety": {"temperature": 2.5, "accepted_for_display": True},
+        "quality": {"temperature": 1.7, "accepted_for_display": True},
+    }))
+    calibration = p._get_calibration()
+    assert calibration == {"variety": 2.5, "quality": 1.7}
+
+
+@needs_unified
+def test_temperature_scaling_changes_confidence_but_never_the_predicted_class(tmp_path):
+    """Dividing every logit by the same positive scalar before softmax is a
+    monotonic rescaling -- it cannot change which class has the highest score.
+    Only the number attached to that class, and the full distribution around
+    it, may move."""
+    from PIL import Image
+    from src.pipeline.unified_pipeline import AnalysisPipeline
+    from src.registry.model_registry import checkpoint_sha256
+
+    manifest = os.path.join(PROCESSED, "manifest_dataset_4_quality.csv")
+    if not os.path.exists(manifest):
+        pytest.skip("quality manifest not generated")
+    with open(manifest) as fh:
+        row = next(r for r in csv.DictReader(fh) if r["split"] == "test")
+    img = Image.open(row["filepath"]).convert("RGB")
+
+    # An isolated pipeline pointed at an empty scratch directory, independent of
+    # whether this repo happens to have already run calibrate_unified.py -- the
+    # comparison must hold regardless of that.
+    raw_pipeline = _isolated_pipeline(tmp_path / "raw")
+    raw_variety, raw_quality, _ = raw_pipeline.classify_unified_full(img)
+    assert raw_variety["confidence_calibrated"] is False
+    assert raw_quality["confidence_calibrated"] is False
+
+    cal_dir = tmp_path / "calibrated"
+    cal_dir.mkdir()
+    calibrated_pipeline = _isolated_pipeline(cal_dir)
+    live_hash = checkpoint_sha256(calibrated_pipeline._checkpoint_for("variety"))
+    (cal_dir / "unified_calibration.json").write_text(json.dumps({
+        "checkpoint_sha256": live_hash,
+        "variety": {"temperature": 3.0, "accepted_for_display": True},
+        "quality": {"temperature": 3.0, "accepted_for_display": True},
+    }))
+    cal_variety, cal_quality, _ = calibrated_pipeline.classify_unified_full(img)
+
+    assert cal_variety["confidence_calibrated"] is True
+    assert cal_quality["confidence_calibrated"] is True
+    assert cal_variety["predicted_class"] == raw_variety["predicted_class"]
+    assert cal_quality["predicted_class"] == raw_quality["predicted_class"]
+    # T=3.0 softens an already-confident softmax; a genuinely high-confidence
+    # raw prediction must come back lower, never higher, under a T > 1.
+    if raw_variety["confidence"] > 1 / len(raw_variety["class_probabilities"]):
+        assert cal_variety["confidence"] <= raw_variety["confidence"]
 
 
 # --------------------------------------------------------------------------

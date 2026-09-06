@@ -86,3 +86,140 @@ export const isVarietyRow = (c) =>
   !!c && !c.is_synthetic_model && !QUALITY_MODEL.test(c.model_name || "");
 
 export const isLegacySyntheticRow = (c) => !!c && !!c.is_synthetic_model;
+
+/* ============================================================
+   Foreign-object flagging (Phase 4).
+
+   This is a different kind of statement from seedHealth and is kept separate on
+   purpose. Health asks "is this kernel sound?"; this asks "is this a maize kernel
+   at all?" — and a bad grade for an object that may not be maize is meaningless,
+   so the UI shows this instead of the grade rather than alongside it.
+
+   FLAGGING, NOT CLASSIFICATION. The backend measures distance from known maize.
+   It holds no labels for stones, husk, cob fragments or debris, so nothing here
+   may ever render a material name, and no caller may invent one. Every figure
+   shown comes from the gate artifact via the API; none is written here.
+   ============================================================ */
+
+export function foreignFlag(seed) {
+  const f = seed?.foreign_object;
+  if (!f || f.status !== "possible_foreign_object") return null;
+  return {
+    flagged: true,
+    // Deliberately not a name. "Unidentified" is the whole finding.
+    label: "Possible foreign object",
+    reason:
+      f.caveat ||
+      "Does not resemble the maize kernels the system knows. Not identified.",
+    // Present only when the build that shipped the gate measured it.
+    endToEndRecall: f.end_to_end_recall ?? null,
+  };
+}
+
+/* An object the gate declined to score at all, which is neither flagged nor
+   cleared. It is deliberately not a foreignFlag: drawing it like a flag would
+   accuse an object the system never examined, and hiding it would let a refusal
+   read as a pass. It gets its own quiet state in the panel and no box marking.
+
+   Two things trigger it, both measured rather than chosen: the object is smaller
+   than the smallest crop the score was calibrated on, or its image holds more
+   objects than any scene the gate was calibrated against. */
+export function foreignUnavailable(seed) {
+  const f = seed?.foreign_object;
+  if (!f || f.status !== "unavailable") return null;
+  return {
+    label: "Foreign-object review unavailable",
+    reason: f.caveat || "This object is outside the range the check was measured on.",
+    cropPx: f.crop_px ?? null,
+    floorPx: f.resolution_floor_px ?? null,
+    sceneObjects: f.scene_objects ?? null,
+    sceneLimit: f.scene_limit_objects ?? null,
+  };
+}
+
+/* ============================================================
+   Visible symptom category (Phase 5).
+
+   A third, separate statement about a kernel, and separate for a reason. Health
+   asks "is this kernel sound?", the foreign-object gate asks "is this maize at
+   all?", and this asks "which visible condition category would a grader file it
+   under?" — three questions with three answers that can disagree, and collapsing
+   any of them into another would hide the disagreement.
+
+   APPEARANCE, NOT AETIOLOGY. The categories are the vocabulary expert graders
+   used to record how a kernel LOOKS. Nothing here is a disease diagnosis: no
+   pathogen, toxin or species is identified anywhere in this project, and the
+   payload carries is_diagnosis = false to keep that from depending on prose.
+
+   A withheld verdict is returned as a withheld verdict rather than as null. The
+   backend already nulls `predicted_class` in that case, so there is nothing here
+   to read as a category — but a caller that saw only `null` would have no way to
+   tell "the model looked and would not commit" from "no symptom", and those are
+   different facts about a kernel.
+   ============================================================ */
+
+export function symptomVerdict(seed) {
+  const sp = seed?.symptom_prediction;
+  if (!sp) return null;
+
+  if (sp.status === "reported") {
+    return {
+      reported: true,
+      category: sp.predicted_class,
+      description: sp.description || null,
+      confidence: sp.confidence ?? null,
+      threshold: sp.confidence_threshold ?? null,
+      caveat: sp.caveat || null,
+      basis: sp.basis || null,
+    };
+  }
+
+  return {
+    reported: false,
+    category: null,
+    // What the model would have said with no gate in front of it, under a name
+    // that cannot be read as the verdict. Shown so an operator can see the
+    // system was not idle, never so they can use it as the answer.
+    nearest: sp.argmax_class_before_gate || null,
+    nearestConfidence: sp.argmax_confidence ?? null,
+    reason: sp.reason || null,
+    threshold: sp.confidence_threshold ?? null,
+    caveat: sp.caveat || null,
+    basis: sp.basis || null,
+  };
+}
+
+/* Counts for a whole image, derived from the per-seed verdicts the models
+   actually produced — nothing here is estimated or filled in. Withheld kernels
+   are tallied in their own bucket and never added to a category, least of all
+   NOR: an abstention counted as "no visible symptom" would turn a silence into a
+   clean result. */
+export function symptomTally(seeds) {
+  const categories = {};
+  const withheld = {};
+  let scored = 0;
+
+  for (const seed of seeds || []) {
+    const v = symptomVerdict(seed);
+    if (!v) continue;
+    scored += 1;
+    if (v.reported) categories[v.category] = (categories[v.category] || 0) + 1;
+    else withheld[v.reason || "withheld"] = (withheld[v.reason || "withheld"] || 0) + 1;
+  }
+
+  const named = Object.values(categories).reduce((a, b) => a + b, 0);
+  return {
+    scored,
+    named,
+    withheld,
+    withheldTotal: scored - named,
+    categories,
+    coverage: scored ? named / scored : null,
+  };
+}
+
+export const WITHHELD_REASONS = {
+  class_not_validated:
+    "the closest category is one the model is not permitted to assert",
+  low_confidence: "the prediction fell below the calibrated confidence floor",
+};

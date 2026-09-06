@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { GitCompare, Sparkles, Sprout } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
+import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
 import { isQualityRow, isVarietyRow } from "../lib/seedHealth";
 import {
   Badge,
@@ -53,7 +54,12 @@ function Side({ analysis, label }) {
         {v ? (
           <>
             <strong className="cmp__val">{pretty(v.predicted_class)}</strong>
-            <ConfidenceBar value={v.confidence} showValue label={null} />
+            <ConfidenceBar
+              value={v.confidence}
+              calibrated={v.confidence_calibrated}
+              showValue
+              label={null}
+            />
           </>
         ) : (
           <span className="faint">No variety prediction</span>
@@ -67,8 +73,17 @@ function Side({ analysis, label }) {
         </div>
         {d ? (
           <>
-            <strong className="cmp__val cmp__val--warn">{pretty(d.predicted_class)}</strong>
-            <ConfidenceBar value={d.confidence} showValue label={null} />
+            <strong
+              className={`cmp__val ${/^(bad|defect)/i.test(d.predicted_class) ? "cmp__val--warn" : ""}`}
+            >
+              {pretty(d.predicted_class)}
+            </strong>
+            <ConfidenceBar
+              value={d.confidence}
+              calibrated={d.confidence_calibrated}
+              showValue
+              label={null}
+            />
           </>
         ) : (
           <span className="faint">No quality grade</span>
@@ -157,11 +172,8 @@ export default function Compare() {
     if (!idA || !idB) return;
     setAi({ state: "loading", text: null });
     try {
-      const r = await api.compareAnalyses([idA, idB]);
-      setAi({
-        state: "ready",
-        text: r.comparison || r.explanation || r.summary || r.text || "No comparison returned.",
-      });
+      const { text, available } = readCopilot(await api.compareAnalyses([idA, idB]));
+      setAi({ state: available ? "ready" : "error", text });
     } catch (e) {
       setAi({ state: "error", text: e.message });
     }
@@ -198,7 +210,7 @@ export default function Compare() {
 
       {state === "ready" && analyses.length >= 2 && (
         <>
-          <GlassCard className="cmp__pickers">
+          <GlassCard tier="floating" className="cmp__pickers">
             <label className="cmp__picker">
               <span>Analysis A</span>
               <select value={idA || ""} onChange={(e) => setIdA(e.target.value)}>
@@ -252,7 +264,7 @@ export default function Compare() {
             </div>
           </GlassCard>
 
-          <GlassCard accent="cyan">
+          <GlassCard accent="cyan" tier="primary">
             <SectionHeader
               title="AI comparison"
               subtitle="Gemini interprets the two verified results above."
@@ -275,7 +287,11 @@ export default function Compare() {
             {ai.state === "loading" && <Skeleton height="48px" />}
             {(ai.state === "ready" || ai.state === "error") && (
               <div className={`cmp__ai ${ai.state === "error" ? "is-error" : ""}`}>
-                <span className="cmp__ailabel">AI-generated comparison based on model analysis</span>
+                <span className="cmp__ailabel">
+                  {ai.state === "error"
+                    ? UNAVAILABLE_LABEL
+                    : "AI-generated comparison based on model analysis"}
+                </span>
                 <p>{ai.text}</p>
               </div>
             )}

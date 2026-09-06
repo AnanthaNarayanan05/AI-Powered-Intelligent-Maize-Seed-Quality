@@ -109,7 +109,8 @@
   color: var(--ink);
   font-size: var(--text-xs);
   font-weight: 600;
-  white-space: nowrap;
+  text-align: right;
+  justify-content: flex-end;
 }
 
 /* ---------- capability lists ---------- */
@@ -145,4 +146,56 @@
 .si__capicon--no {
   background: rgba(232, 112, 90, 0.14);
   color: var(--danger);
+}
+
+/* ---------- live model rows ---------- */
+.si__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.si__stack--muted .si__rowname,
+.si__stack--muted .si__rowmodel {
+  color: var(--ink-faint);
+}
+.si__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.si__metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--glass-border);
+  font-size: 0.66rem;
+}
+.si__metriclabel {
+  color: var(--ink-faint);
+}
+.si__metricval {
+  color: var(--ink);
+  font-weight: 600;
+}
+.si__rownote {
+  margin-top: var(--sp-2);
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--warn);
+  max-width: 60ch;
+}
+.si__rowpath {
+  margin-top: 4px;
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+.si__note {
+  margin: var(--sp-3) 0 0;
+  font-size: 0.7rem;
+  line-height: 1.6;
+  color: var(--ink-faint);
 }

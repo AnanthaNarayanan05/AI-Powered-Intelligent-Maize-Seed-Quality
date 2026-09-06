@@ -32,10 +32,38 @@ from src.contrastive.simclr import build_eval_transform, build_simclr_augmentati
 from src.data.datasets import UnifiedSeedDataset
 from src.models.unified_model import UnifiedSeedModel
 from src.utils.config import load_config, get_device
+from src.registry.model_registry import checkpoint_sha256
 from src.utils.seed import set_seed
 from src.utils.logging_utils import get_logger
 
 logger = get_logger("train_unified")
+
+
+class FocalLoss(nn.Module):
+    """Standard multiclass focal loss (Lin et al. 2017): FL(p_t) = -(1-p_t)^gamma * log(p_t).
+    Down-weights already-easy, correctly-classified examples so gradient concentrates on
+    the hard ones -- unlike class-frequency weighting, which reweights by how RARE a
+    class is regardless of how confidently the model already gets it right. Tried as the
+    second SanzalSima lever (docs/09 sec 6.10/6.7): if the SanzalSima<->WangDataa
+    confusion is a genuine hard-example problem rather than a class-imbalance one (which
+    --variety-class-weights tested and did not confirm), this is the more targeted fix.
+    gamma=0 reduces exactly to CrossEntropyLoss."""
+
+    def __init__(self, gamma: float, ignore_index: int = -1):
+        super().__init__()
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+
+    def forward(self, logits, targets):
+        mask = targets != self.ignore_index
+        if not mask.any():
+            return logits.sum() * 0.0
+        logits, targets = logits[mask], targets[mask]
+        log_p = torch.log_softmax(logits, dim=1)
+        log_pt = log_p.gather(1, targets.unsqueeze(1)).squeeze(1)
+        pt = log_pt.exp()
+        return -((1 - pt) ** self.gamma * log_pt).mean()
+
 
 MANIFEST = "data_processed/manifest_unified.csv"
 VARIETY_CLASSES = ["Zea_mays_Chulpi_Cancha", "Zea_mays_Indurata", "Zea_mays_Rugosa",
@@ -84,6 +112,17 @@ def main():
     ap.add_argument("--encoder", default=None, help="Contrastively pretrained trunk to start from.")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--no-attention", dest="attention", action="store_false", default=True)
+    ap.add_argument("--variety-class-weights", action="store_true", default=False,
+                     help="Weight the variety head's CrossEntropyLoss by inverse class "
+                          "frequency (same formula train_variety.py already uses), to "
+                          "test whether SanzalSima's 60.6% test recall (docs/09 sec 6.10) "
+                          "is a class-imbalance effect. SanzalSima has fewer distinct "
+                          "source seeds (33) than Bhihilifa (46) or WangDataa (48).")
+    ap.add_argument("--focal-gamma", type=float, default=None,
+                     help="Use FocalLoss(gamma) instead of CrossEntropyLoss for the "
+                          "variety head, to test whether the SanzalSima confusion is a "
+                          "hard-example rather than a class-imbalance problem. Mutually "
+                          "exclusive with --variety-class-weights.")
     ap.add_argument("--tag", default="unified")
     args = ap.parse_args()
 
@@ -131,7 +170,25 @@ def main():
     w_var, w_qual = n_var / total, n_qual / total
     logger.info(f"head loss weights -- variety {w_var:.3f}, quality {w_qual:.3f}")
 
-    crit_v = nn.CrossEntropyLoss(ignore_index=IGNORE)
+    if args.variety_class_weights and args.focal_gamma is not None:
+        raise SystemExit("--variety-class-weights and --focal-gamma are mutually exclusive")
+
+    variety_weight = None
+    if args.variety_class_weights:
+        counts = [0] * len(VARIETY_CLASSES)
+        for r in train_ds.rows:
+            label = r.get("variety_label")
+            if label:
+                counts[VARIETY_CLASSES.index(label)] += 1
+        variety_weight = torch.tensor([1.0 / max(c, 1) for c in counts], dtype=torch.float32, device=device)
+        variety_weight = variety_weight / variety_weight.sum() * len(VARIETY_CLASSES)
+        logger.info(f"variety class weights ({VARIETY_CLASSES}): {variety_weight.tolist()}")
+
+    if args.focal_gamma is not None:
+        crit_v = FocalLoss(args.focal_gamma, ignore_index=IGNORE)
+        logger.info(f"variety head loss: FocalLoss(gamma={args.focal_gamma})")
+    else:
+        crit_v = nn.CrossEntropyLoss(ignore_index=IGNORE, weight=variety_weight)
     crit_q = nn.CrossEntropyLoss(ignore_index=IGNORE)
 
     epochs = args.epochs or cfg["training"]["epochs"]
@@ -202,12 +259,18 @@ def main():
             "manifest": MANIFEST,
             "encoder": args.encoder,
             "use_attention": args.attention,
+            "variety_class_weights": variety_weight.tolist() if variety_weight is not None else None,
+            "variety_focal_gamma": args.focal_gamma,
             "variety_classes": VARIETY_CLASSES,
             "quality_classes": QUALITY_CLASSES,
             "split_sizes": {k: len(d) for k, d in
                             (("train", train_ds), ("val", val_ds), ("test", test_ds))},
             "best_val_mean_f1": best_score,
             "test_metrics": test,
+            # Binds these numbers to the artefact that produced them. The registry
+            # recomputes it; retraining without re-evaluating shows up as a stale
+            # binding instead of the old score being reported for the new model.
+            "checkpoint_sha256": checkpoint_sha256(best_path),
         }, f, indent=2)
 
     for head, m in test.items():

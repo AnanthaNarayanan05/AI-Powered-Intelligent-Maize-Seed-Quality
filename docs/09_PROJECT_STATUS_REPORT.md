@@ -1,7 +1,7 @@
 # Project Status Report
 
 **Project:** AI-Powered Intelligent Maize Seed Quality, Defect, Variety Recognition and Detection System Using Contrastive Learning and Cognitive Attention
-**Report date:** August 26, 2026 (supersedes the August 24 post-training status)
+**Report date:** August 26, 2026 (supersedes the August 24 post-training status) — **updated September 4, 2026, see §10**
 **Prepared for:** Ananthu
 **Location:** `C:\COLLEGE\Project\FINALYEARPROJECT` (local RTX 4060 machine)
 
@@ -110,6 +110,10 @@ original weakness was its threshold, not its scoring function.
 - **Duplicate detections** (§6.8): Ultralytics' default NMS IoU of 0.70 produced two boxes on one kernel in 41.7% of close-ups. `nms_iou: 0.40` cuts that to 1.7% *and* lowers dense-scene count error from 1.20 to 0.72.
 - **Similarity search is visual/feature similarity, not certification** (§2).
 - **Seed-lot composition reporting** is new: variety composition, off-type rate and soundness aggregated over many analyses. It is explicitly *not* a certification, which is a legal determination made by an accredited laboratory following a prescribed sampling protocol.
+
+### 1.6 What has shipped since this report was written
+
+Everything in §§1–9 is unchanged from August 26 and is retained as the historical record. Four new served capabilities and the project's first real (non-synthetic) defect model have shipped since: foreign-object flagging, visible-symptom classification, a widened history schema for the pixel-level phases, a Gemini SDK migration, and — the largest single piece of work — a complete annotation review of 1,100 SAM/colour-distance defect proposals over real GrainSpace imagery, ending in a trained, evaluated, and registered (but not yet served) `defect_segmenter_real`. **See §10** for the full account.
 
 ---
 
@@ -321,16 +325,33 @@ Dataset B is ~17× the size of Dataset A (17,713 images; 12,403 train) and was t
 | `contrastive_only` (+ contrastive pretraining) | **99.96%** | **0.9996** | **1** | +0.0008 |
 | `full` (proposed: both) | 99.92% | 0.9992 | 2 | +0.0004 |
 
-### 6.3 Synthetic defect classifier (4 classes, 630-image test split)
+### 6.3 Synthetic defect classifier (4 classes, 624-image test split, group-split)
 
-Test accuracy **99.68%**, macro-F1 0.9968. Only 2 errors, both thin-crack images read as healthy.
+Test accuracy **99.20%**, macro-F1 0.9920. All 5 errors are cracked images read as healthy.
 
 | Class | Precision | Recall | F1 | Support |
 |---|---|---|---|---|
-| healthy | 0.988 | 1.000 | 0.994 | 158 |
-| cracked | 1.000 | 0.987 | 0.994 | 158 |
-| discolored_mold | 1.000 | 1.000 | 1.000 | 157 |
-| insect_damaged | 1.000 | 1.000 | 1.000 | 157 |
+| healthy | 0.969 | 1.000 | 0.984 | 156 |
+| cracked | 1.000 | 0.968 | 0.984 | 156 |
+| discolored_mold | 1.000 | 1.000 | 1.000 | 156 |
+| insect_damaged | 1.000 | 1.000 | 1.000 | 156 |
+
+**Re-trained 2026-08-27 after fixing a split defect.** The original split was
+row-level stratified. Every source kernel produces four rows here -- the untouched
+original as `healthy` plus one painted variant per defect class -- so the same
+physical kernel appeared in train as `healthy` and in test as `cracked`. That is the
+same provenance leakage that inflated the Dataset B variety numbers (section 6.9), and the
+fix is the same: `make_split_indices` now deals out whole SOURCE SEEDS via
+`src.data.group_split.split_groups`, stratified by source variety. Zero source
+overlap between any two splits, verified.
+
+The number barely moved: **99.68% -> 99.20%**. That is itself the finding. The old
+score was not mostly leakage; the task is simply easy, because an OpenCV-painted
+crack is a far more separable thing than a real fracture. It makes the caveat below
+stronger, not weaker -- fixing the leak did not reveal a hidden weakness, it
+confirmed that this metric was never measuring real defect detection in the first
+place.
+
 
 > **This number must never be reported without its caveat.** ~99.7% here is the *expected* result and is **not** evidence of real defect-detection capability. The model is recognizing procedurally generated patterns drawn by a known OpenCV routine, so the classes are far more visually separable than real damage would be. It demonstrates that the architecture and the serving path can learn and serve a defect task. It says nothing about real-world plant pathology. See `docs/06_SYNTHETIC_DEFECT_POLICY.md`.
 
@@ -582,18 +603,25 @@ Covered in full in §4.3. In brief: the quality head is accurate in-distribution
 | 8 | Consolidate to a single served model | **Done** — §6.10; one trunk, two heads, six varieties plus quality |
 | 9 | Gate quality output on distribution distance | **Done** — §4.3, §6.11; catches 100% of Dataset A |
 | 10 | Seed-lot composition reporting | **Done** — `/api/lot/report`, verified on 1,572 kernels |
+| 11 | Foreign-object flagging | **Done** — §10.1; `maize_identity_gate`, 5% review budget, 69.8% impurity recall |
+| 12 | Visible-symptom classification | **Done** — §10.2; `visible_symptom_classifier`, 56.9% coverage at 76.9% test accuracy |
+| 13 | Persist pixel-level measurements in history | **Done** — §10.3; additive schema, 169→217 tests, zero rows corrupted |
+| 14 | Migrate off the retired Gemini SDK | **Done** — §10.4; `google-genai`, ground rules verified live |
+| 15 | Annotate and train a real (non-synthetic) defect segmenter | **Done, not served** — §10.5; `defect_segmenter_real`, `seed_body` IoU 0.82, three defect channels too small or too degenerate to serve |
 
 ### Optional future work (genuinely out of scope, not omissions)
 
 Ordered by value:
 
-- **Run the four-way ablation on the quality head.** This is now the highest-value experiment remaining. The quality corpus has 4,416 independent groups against Dataset B's 19 source seeds — roughly 0.14pp of resolution versus 5.26pp — and quality assessment is a less saturated task than 3-class variety ID. Every asset it needs already exists. If contrastive pretraining and cognitive attention have a measurable effect anywhere in this project, this is where it can actually be demonstrated rather than merely suggested.
+- ~~Run the four-way ablation on the quality head.~~ **Done, §10.11** — 662 test groups gave far more resolution than Dataset B's 19 seeds, and none of the six pairwise comparisons reached significance; `full` (the served architecture) was statistically indistinguishable from `baseline`.
 - **Repeat each experiment across several random seeds** and report mean ± std (§6.7, item 1). The §6.9 result rests on a single run per variant over 19 test seeds; a few GPU-hours converts a suggestive finding into a defensible one. Most likely to be raised in review.
 - **Run the label-efficiency curve** (§6.7, item 2) — retrain each variant at 1/5/10/25% of training labels. This is the regime contrastive pretraining exists to serve, and §6.9 now gives a positive reason to expect an effect there.
-- **Improve SanzalSima recall** (§6.10). At 60.6%, it is the weakest measured behaviour in the served model, and it is a genuine visual confusion with WangDataa rather than an artefact.
+- **Improve SanzalSima recall** (§6.10) — **investigated, §10.12**: class-weighted loss and focal loss were both tried and both slightly regressed it (60.6%→59.6%/59.2%), corroborating rather than resolving the "genuine visual confusion" read. Still open: stronger augmentation, a different crop strategy, or more physical source seeds (the last is the item below, and the one most likely to actually move this number).
 - **Acquire more source seeds for Dataset B.** 127 physical seeds behind 17,713 files is the binding constraint on statistical power; no augmentation or splitting strategy can manufacture independent observations the data does not contain.
 - **Validate the quality head outside its current distribution.** It is measured only against Mendeley-style kernel close-ups. Extending it to Dataset A/B imagery requires quality labels for those datasets, which do not exist.
-- **Capabilities requiring data this project does not hold:** pixel-level defect segmentation (needs masks), defect severity scoring (needs ordinal labels or defect area), foreign-object identification (needs non-kernel detection classes), and fungal/insect/disease diagnosis (the literature relies on NIR/hyperspectral bands at 715 nm and 965 nm that an RGB camera cannot observe). Each is listed as unsupported in the UI rather than approximated.
+- **Grow the annotated-positive pool for real defect segmentation, `insect_damaged` first** (§10.5). This is no longer blocked on masks not existing — 436 real rows are annotated and a first checkpoint trains and evaluates cleanly on `seed_body`. It is blocked on volume: `insect_damaged` has 1–2 positive images per split, which is why it is degenerate rather than merely weak.
+- ~~Calibrate confidence before re-enabling the confidence bars~~ **Done, §10.10** — both heads temperature-scaled, checksum-verified, threaded end-to-end as a per-prediction `confidence_calibrated` flag; see [`docs/12_CONFIDENCE_CALIBRATION.md`](12_CONFIDENCE_CALIBRATION.md).
+- **Capabilities still requiring data this project does not hold:** defect severity scoring (needs ordinal labels or a calibrated defect-area percentage, and every current channel is measured `DETECTION_ONLY`), foreign-object *identification* (the Phase 4 gate flags, it does not name a material — no stone/husk/debris labels exist), and fungal/insect/disease *diagnosis* (the literature relies on NIR/hyperspectral bands at 715 nm and 965 nm that an RGB camera cannot observe; the Phase 5 symptom classifier names a grader's visual category, never a pathogen). Each is listed as unsupported in the UI rather than approximated.
 
 ---
 
@@ -635,4 +663,190 @@ Ordered by value:
 
 ---
 
-*This report reflects the actual, verified state of the project as of the date above. No capability listed as "done" here has been claimed without a corresponding test run, and no accuracy figure has been reported without the checkpoint and metrics file that produced it.*
+## 10. Update — September 4, 2026
+
+Everything in §§1–9 is the report as originally written and is left untouched above. This section covers what shipped in the nine days since: four phases (4, 5, 9, 18) and the annotation-and-training work referred to throughout this project's commit history as Track A. `pytest tests/` now reports **217 passed, 0 failed**, up from the 40 quoted in §1 — the remainder of that growth is regression coverage added alongside each phase below, not a change to any existing test.
+
+### 10.1 Foreign-object flagging gate (Phase 4)
+
+A new gate scores each detected crop by kNN cosine distance to a maize-wide reference bank of detector crops, and calls the result *possible foreign object* or *known maize* — never a material name, because this project holds no labels for stone, husk, cob fragments or debris. Three findings shaped what shipped, each lowering the headline number rather than flattering it:
+
+- **Calibration domain.** A reference built from whole-dataset crops shifted distances 18× against the detector crops the gate actually sees at serve time, which put the flag rate at 80.2% on ordinary maize against a claimed 2% budget. The reference is now built in the serving domain — detector crops, the same transform used at inference.
+- **Crop size confound.** R² = 0.243 of the raw distance was explained by crop short side alone — a smaller crop scored more foreign regardless of what it was. The correction (§8 of `Pipeline Mathematics`, quadratic in log-crop-size) is fitted on held-out calibration crops only, and the gate declines below a measured 21px floor rather than extrapolate a fit it has no evidence for.
+- **Dense scenes.** No reference or calibration image carries more than 16 detected objects. A real 300-object upload — a packed bed of ordinary maize — had 42% of its objects surfaced, because in a packed scene every crop is filled with fragments of its neighbours. Above the 16-object limit the gate now returns *unavailable* rather than a number it cannot stand behind.
+
+Measured at the shipped 5% review budget: threshold +0.1422, gate recall 0.698 on GrainSet impurities, YOLO's own detection ceiling 0.7417 on the same set (so end-to-end recall is 0.5177), enrichment 9.29×. **Most foreign objects are still missed, and the absence of a flag is not evidence of purity** — both statements ship in the served caveat, not just in this document. Calibration data is GrainSet (Zhao et al., *Sci Data* 10:748, 2023, CC BY 4.0), 3,600 of 38,020 members fetched selectively by byte range (493 MB rather than 6.04 GB). No new model was trained — the gate reuses the existing unified encoder. Registered as `maize_identity_gate` v2.0.0.
+
+### 10.2 Visible-symptom classifier (Phase 5)
+
+Names a visible condition category — or says why it declined to — on the only real labels this project can honestly obtain: 1,260 GrainSpace M600 kernel crops carrying expert-grader condition categories (AP, BN, FM, HD, MY, NOR, SD). No maize leaf-disease dataset stands in for kernel imagery, and no label is propagated or synthesised; that 1,260 is a ceiling, since GrainSpace's train half is organised by cultivar and carries no condition annotation at all. Every payload carries `is_diagnosis: false` as a field, not just a caveat in prose — FM is the grader category "fusarium & mildew," and naming it is not a fusarium finding.
+
+Three training routes were measured before choosing how to serve it:
+
+| route | test macro-F1 | cost to the other tasks in the same trunk |
+|---|---|---|
+| frozen-trunk head | 0.2605 | none (trunk untouched) |
+| joint fine-tune | 0.2343 | quality −0.0096 F1 |
+| specialised full fine-tune | **0.5865** | variety 0.9316→0.5048, quality 0.9721→0.5800 |
+
+The specialised weights are the only usable ones, but they measurably wreck the trunk's other two tasks — so they ship as their own checkpoint, and `unified_seed_model_best.pt` is untouched (verified bit-identical before the symptom work began). A two-part abstention gate sits in front of it: only 5 of 7 classes are validated (HD has 9 validation crops, SD has 2 — both below the support at which an operating point means anything, so a win there is withheld rather than reported), and a 0.55 softmax floor withholds the rest, chosen as the smallest floor whose validation accuracy over retained predictions reaches 0.85. Gated, it names a category for **56.9% of held-out kernels and is right on 76.9% of those** — validation ran 8.96 points optimistic against test, and that gap travels alongside the accuracy everywhere it is reported, not just here.
+
+The serving domain was checked, not assumed: these labels come from GrainSpace crops, but the platform is fed YOLO crops from real uploads — a different domain. Measured over 633 kernels from 35 readable real uploads: 0.712 coverage, 449 of 451 named verdicts were NOR, 124 withheld for confidence and 58 for an unvalidated class. Accuracy there is deliberately reported as null — those uploads carry no visible-condition ground truth, so it cannot be computed and is not estimated. A withheld kernel is stored as `symptom_class = NULL`, with the would-have-been answer kept separately as `symptom_argmax_class` under a name that cannot be mistaken for the verdict, and the UI renders a refusal in its own visual language with no confidence bar — a percentage there would be the confidence of a prediction that was never made.
+
+### 10.3 History schema widened for the pixel-level phases (Phase 9)
+
+History previously stored a box, a label and some neighbours; everything the pipeline already computed about resolution and segmentation was thrown away on write. The schema now has somewhere for it to live, on two rules that matter more than the columns themselves: a seed with **no** segmentation row was never put to a segmenter, while a row saying **unavailable** was, and carries why — those are different claims and the schema no longer conflates them. Phase 2/3/4 columns stay `NULL` rather than `0`, because a zero reads as *measured, no defect found*, a different claim from *not measured*. Masks are stored as a path plus the sha256 of the file at that path, never as bytes — the same scheme the model registry already uses for checkpoints. Migration is additive and nullable only; verified against the real database (151 analyses, 2,884 detections, 5,704 classifications, 2,884 similarity results, 34 batches) with every old row reading back as *unknown* rather than a default that looks like a finding.
+
+### 10.4 Gemini SDK migration (Phase 18)
+
+`google-generativeai` is retired; its replacement, `google-genai`, is not a drop-in rename. Timeouts are milliseconds now, not seconds — carrying the old number across unchanged would have turned a 20-second budget into 20 milliseconds, measured both directions to confirm (`timeout=2` aborts in 0.26s, `timeout=30000` returns in 12.53s). The system instruction — `LIMITATION_CONTEXT`, the only thing stopping Gemini from claiming a defect area, a segmentation, a severity, or a pathogen diagnosis — now attaches per request rather than to a reused model object, verified live by asking point-blank for a defect area in mm² and a named fungal pathogen: both correctly refused. The automatic function-calling loop the new SDK runs by default is explicitly switched off, since this module passes it no tools.
+
+Verifying the failure path surfaced two pre-existing frontend bugs, fixed in the same commit because they sit inside this phase's own contract: `/copilot` rendered a blank page (two hooks used without being imported), and nothing in the UI read `ai_available` or `fallback_reason` — every call site replaced a server-side outage with "No response returned." under a caption still claiming an AI-generated explanation, so an outage looked like the model having nothing to say.
+
+### 10.5 Track A: the annotation review is complete, and the first real defect segmenter is trained
+
+This is the largest single piece of work since August 26. All three real defect classes (`cracked`, `discolored_mold`, `insect_damaged`) previously had zero real (non-synthetic) annotations — every mask up to this point was painted by `synthetic_defect_generator.py`. Track A closes that gap by hand-reviewing SAM ViT-B + colour-distance mask proposals over real GrainSpace M600 defect-channel imagery, contact sheet by contact sheet, against a fixed set of rejection precedents (rim/specular bleed, off-body shadow misread as an on-body streak, the normal bicolor crown/germ pattern, degenerate whole-body proposals) so the same visual judgment is applied consistently across all 1,100 rows.
+
+```
+proposals.csv: 1,100 rows, all decided
+  664 rejected  (no candidate cleanly isolated the true defect, or none was visible)
+  400 no_defect (NOR-class rows with zero proposal candidates, by the dataset's own design)
+   36 accepted  (candidate mask judged to cleanly bound a genuine, visible defect)
+  ---
+  436 verified  ->  data_processed/manifest_segmentation_real.csv  (322 / 58 / 56 train/val/test)
+```
+
+60 of the 436 verified rows carry a human reviewer through `review_server.py`; the remaining 376 were reviewed by `claude-opus-5` reading rendered contact sheets through `apply_sheet_decisions.py` — a script that hard-refuses `--reviewer human`, so the two paths cannot be confused after the fact. Split by GrainSpace plate id, never by image, so no plate straddles train/val/test. The resulting label provenance, `sam_proposed_mixed_review`, is stamped into the manifest's sidecar and is **not human-verified ground truth**; every downstream artefact says so.
+
+An EfficientNet-B0 + U-Net decoder, warm-started from the same contrastive encoder used elsewhere in this project, trains on this manifest with a capped inverse-frequency BCE term (cap 25.0 — `cracked`'s true weight is ≈3,300 and would destabilise training uncapped) plus soft Dice, masked per (image, channel) so an unannotated channel contributes no gradient:
+
+| channel | test IoU | test Dice | precision | recall | false-alarm rate on clean | verdict |
+|---|---|---|---|---|---|---|
+| `seed_body` | **0.82** | **0.90** | 0.95 | 0.85 | 0.000 | segments cleanly |
+| `cracked` | 0.24 | 0.38 | 0.24 | 0.96 | 0.000 | real signal, 1 positive test image — too small to trust |
+| `discolored_mold` | 0.28 | 0.43 | 0.33 | 0.62 | 0.000 | real signal, 5 positive test images — too small to trust |
+| `insect_damaged` | 0.0004 | 0.0009 | 0.0004 | 1.00 | **1.000** | degenerate — paints almost the whole frame |
+
+Every channel is reported `DETECTION_ONLY` — presence, not a calibrated area percentage — and thresholds were tuned on validation only, then frozen and applied once to test. `defect_segmenter_real` is registered in `configs/model_registry.yaml` with **`serves: []`**, the same convention used for `defect_segmenter_synthetic`: trained, evaluated, and honestly described, but not placed in front of a user until `insect_damaged` in particular has enough annotated positives to mean something. This is the first time real (not painted) defect masks exist anywhere in this project, and it directly retires the "pixel-level defect segmentation (needs masks)" line that appeared in this report's punch list before today — the masks now exist; what remains is volume, concentrated in one channel.
+
+### 10.6 Frontend: confidence bars hidden pending calibration
+
+The unified model's displayed confidence is raw, uncalibrated softmax — no temperature scaling has ever been fitted — and separability between the three GrainSpace-derived varieties (SanzalSima test F1 0.74 despite having *more* training images than the classes that score 1.00) means the number legitimately reads low even when the prediction is right. The symptom classifier's confidence is low by explicit design (§10.2 — a 0.55 floor that already trades accuracy for coverage on purpose). Rather than show a number that is either miscalibrated or intentionally conservative without comment, every `ConfidenceBar` in the frontend (Analyze, Batch, Compare, Copilot, History) is hidden behind a single `SHOW_CONFIDENCE` flag in `frontend/src/components/ui/index.jsx`, to be re-enabled once one of the two fixes in this report's punch list actually lands.
+
+### 10.7 Phase 2 external-dataset search — exhausted, no code or data changed
+
+Track A (§10.5) left Phase 2 (`defect_area`) blocked on volume in exactly one channel: `insect_damaged` has zero usable test positives, against `cracked` (1) and `discolored_mold` (5) — all three too small to trust regardless of the model. Before committing to the largest remaining option (triaging the ~79,209-image unlabeled GrainSpace train-half archive by condition class, then running `sam_propose.py` against it for a second annotation pass), a public external dataset was checked as the cheaper alternative. None qualified, and the search is recorded here so it is not re-run:
+
+| Candidate | Why it doesn't close the gap |
+|---|---|
+| GrainSet (already integrated, §10.1) | PMC full text (`PMC10632488`) confirms its per-kernel polygon is for morphology/cropping, not defect location — 8-class whole-kernel labels, no sub-kernel mask. |
+| *Foods* 2025/2026, 50-image maize set | Data Availability Statement: author-contact-only, never public. |
+| *Agriculture* 16(4):421, "Limited-Annotation **Seed** Segmentation" (OAMamba) | Title names the segmentation target as the seed itself (kernel-vs-background instance segmentation), not the defect region within a sound kernel — same shape of gap as GrainSet. MDPI blocks direct fetch (403) and carries no PMC mirror, so this is the one candidate not confirmed from primary text, but every corroborating signal (title, abstract, the pattern below) points the same way. |
+| VMUnet-MSADI (*Sci Reports* 2025, `PMC11954911`, public code + Google Drive dataset) | Traced past the "pixel-level segmentation masks" claim in secondary summaries to the paper's actual method: binarization + contour detection to separate a whole kernel from background, over data collected on GrainSpace's own P600/G600/M600 rigs — the class list (fusarium & shriveled, sprouted, moldy, broken, pest-attacked, black-point) is GrainSet's own, repackaged. Same kernel-vs-background segmentation, not defect-region segmentation. |
+
+Every corn/maize paper found that uses "segmentation" in its title turns out to mean separating the kernel from the background, then classifying the whole kernel — never delineating where a defect sits within one. That matches this project's own 48-paper literature survey (`02_LITERATURE_SURVEY_ANALYSIS.md`), which never surfaced a public pixel-level defect-region mask dataset for maize either. Presented with this finding, the call on how to proceed was put to the project owner rather than decided here — per this project's standing rule that provenance and labeling-effort tradeoffs are not unilateral engineering decisions — and the decision was to leave Phase 2 blocked for now rather than commit to the train-half mining effort or ship the caveated partial result. `defect_area` and `defect_severity` remain in `orchestrator.py`'s `UNBUILT` dict, refused with their existing reasons, unchanged.
+
+### 10.8 Gemini copilot: fixed a per-minute quota failure on every multi-seed explanation
+
+Every `/api/copilot/*` route built its prompt by JSON-dumping the full stored analysis — every detection, both classifications, the similarity result and the assessment row for each seed, one record at a time. On the standard 300-seed upload that serialises to **1,028,009 characters**, which the free-tier Gemini quota (250,000 input tokens/minute) cannot accept in a single request; the call failed with `429 RESOURCE_EXHAUSTED`, which `generate_text`'s catch-all correctly turned into a generic `ClientError` and reported as "the AI explanation service is temporarily unavailable" — an honest fallback message, but one that read as a transient outage when the failure was actually deterministic and would recur on every 300-seed analysis, every time.
+
+`summarize_analysis()` (`backend/services/gemini_service.py`) replaces the raw per-seed arrays with aggregates computed from those same records — detection confidence stats, per-model predicted-class counts and confidence, and assessment status counts — before any of `chat`, `explain-analysis` or `compare` build a prompt (`backend/routes/copilot.py`). No field Gemini could previously see is dropped; it is counted once instead of repeated per seed. Verified against the same 300-seed analysis that reproduced the failure: prompt length 1,028,009 → 2,306 characters, and the live endpoint (restarted — it had been running without `--reload` and was still serving the pre-fix code) now returns `ai_available: true` with a full explanation. `summarize-batch` was already reading `get_batch`'s pre-aggregated `aggregate_stats` and needed no change.
+
+### 10.9 Frontend: one surface system, real backgrounds, and the row-classification bug the pass surfaced
+
+A visual redesign across all eight pages. It is recorded here because one presentational pass turned up a data-classification bug that had been silently mislabelling a control, and because the decisions about what *not* to build are the kind this report exists to keep honest.
+
+**The surface system.** `frontend/src/styles/tokens.css` was already the single source of colour, spacing and motion; it gained a three-tier glass hierarchy rather than a second styling vocabulary beside it — `--glass-bg` `rgba(18,24,21,0.68)` (secondary, the default), `--glass-bg-primary` `rgba(11,17,14,0.64)`, `--glass-bg-floating` `rgba(13,19,16,0.58)`, with `--glass-blur` 16px against `--glass-blur-strong` 26px. `GlassCard` takes a `tier` prop that maps to `.glass-card--primary` / `.glass-card--floating` in `ui.css`; omitting it yields the previous appearance exactly, so no untouched component changed. Tiers were applied with restraint — primary for major workspace panels and AI surfaces, floating for toolbars and selectors, secondary for list rows and supporting cards — rather than promoting every card, which would have flattened the hierarchy the tiers exist to create.
+
+**Backgrounds.** The golden-hour field video was moved out of a boxed hero element in `Dashboard.jsx` into the shared `.bg-field` layer that `Layout.jsx` already rendered behind every route, made conditional on `location.pathname === "/"`. Every other route paints the supplied `Background.png` through the same dark-overlay-and-vignette stack, replacing an obsidian gradient and dot grid that had stood in since before any real imagery existed. The layer stays `position: fixed`, `pointer-events: none`, one element for the whole app — no per-page background CSS. Autoplay is guarded by `usePrefersReducedMotion` plus an explicit `play()` and a one-time `pointerdown` retry, and a failed video falls back to its own still poster.
+
+**The bug.** `Lot.jsx` built its declared-variety autocomplete from `!c.is_synthetic_model && c.predicted_class`. That predicate was correct only while the synthetic defect classifier was the sole non-variety model; since §4 the **real quality head is also stored with `is_synthetic_model = 0`**, so `Good` and `Bad` were being offered to the user as varieties to measure off-type against. It is the same predicate that `seedHealth.js` already existed to replace, and `Lot.jsx` was the last page still carrying it. Fixed to use `isVarietyRow`. Verified cleared: `is_synthetic_model` now appears in `frontend/src/` only inside `seedHealth.js`, which owns the flag and documents why it cannot split rows, and at `History.jsx:314`, where it correctly drives a `ProvenanceBadge` rather than classifying anything.
+
+**Two smaller corrections.** `:root` had never declared `color-scheme`, so Chromium rendered native select popups, checkboxes and scrollbars with light chrome regardless of OS theme, against a deliberately dark UI; `color-scheme: dark` fixes it, and the app remains single-theme by design with no toggle anywhere. On the System page, the inference-device row forced `white-space: nowrap` on a value that can be a long GPU name, overflowing its card by ~30px at 375px width; the value now wraps and right-aligns.
+
+**Not built, deliberately.** The supplied reference imagery included a global search field and a weather widget. Neither has a backend — there is no search endpoint and no weather source — and a control that looks operable but returns nothing is the failure mode this project's UI rules exist to prevent, so neither was added. Seed Explorer, a Reports page with CSV/PDF export, and a Settings page were likewise scoped out for the same reason they appear under optional future work rather than as omissions: each needs routes and, for export, endpoints that do not exist.
+
+**Verification.** The frontend carries no test suite — `package.json` defines `dev`, `build`, `lint` and `preview` only — so this pass was verified by running it: all eight pages driven live against the trained backend at desktop width and at 375×812, console clean on every page, no horizontal overflow, navigation and routing exercised, `Background.png` confirmed `200 OK`, and glass translucency confirmed from computed styles rather than by eye alone. The change is presentational: the backend suite stands at **217/217 passing**, untouched, and `vite build` succeeds at 453.68 kB JS / 63.47 kB CSS. `oxlint` reports only pre-existing warnings, none introduced here.
+
+### 10.10 Confidence calibration shipped — §10.6's flag is gone
+
+§10.6's blanket `SHOW_CONFIDENCE = false` is retired. The unified model's variety and quality heads are now measured (reliability diagrams, ECE, Brier score) and, since both clear a bar fixed before the run, temperature-scaled (Guo et al. 2017) — variety `T=2.101` (test ECE 0.092→0.063), quality `T=1.682` (test ECE 0.021→0.011); accuracy is unchanged by construction for both. Every prediction now carries its own `confidence_calibrated` boolean, checksum-verified against the checkpoint actually loaded so a retrain silently reverts that head to raw softmax rather than risk a stale temperature, and threaded end-to-end (pipeline → `classifications` table → API → every `ConfidenceBar` call site). Full methodology, exact numbers, and what remains out of scope (the symptom classifier's own, separate, already-shipped abstention gate): **[`docs/12_CONFIDENCE_CALIBRATION.md`](12_CONFIDENCE_CALIBRATION.md)**.
+
+### 10.11 The quality-head ablation (§6.7 item 3), run — no significant difference between any variant
+
+§6.7 named this the single most informative experiment left in the project: Dataset B's honest test set is 19 physical seeds (5.26pp per seed), while the quality corpus's 662 test groups (near-duplicate kernels collapsed, same grouping as training) give roughly 35× the resolution. If cognitive attention and contrastive pretraining carry a real, general effect, a task with this much more statistical power is where it should be easiest to see.
+
+The same four-experiment machinery §6.9 used for Dataset B (`train_variety.py`'s `EXPERIMENTS` dict, unmodified) was pointed at the Mendeley quality manifest by adding it as a third dataset option alongside `a`/`b` (`configs/config.yaml`'s new `dataset_quality` entry, `src/training/train_variety.py`, `src/training/pretrain_contrastive.py`); a contrastive encoder was pretrained on the quality train split only (3,401 images, 60 epochs), mirroring the group-aware discipline §6.9.1 established. `src/analysis/ablation_significance_quality.py` reuses `ablation_significance.py`'s per-unit paired-Wilcoxon design exactly, scoring each of the 662 test groups once rather than each of the 726 images (avoiding the same pseudo-replication §6.9 warns about).
+
+```
+                     test acc   test F1   group acc (n=662)   best val F1
+baseline              95.87%     95.81%        95.62%           97.90%
+attention_only        96.56%     96.51%        96.83%           96.36%
+contrastive_only      96.56%     96.52%        96.83%           97.48%
+full (proposed)       95.59%     95.54%        95.92%           97.20%
+
+Paired Wilcoxon signed-rank over 662 groups:
+  baseline          vs attention_only    delta=+1.01pp  12/6/644 better/worse/tied  p=0.0943
+  baseline          vs contrastive_only  delta=+0.93pp  16/11/635                   p=0.1740
+  baseline          vs full              delta=+0.03pp  14/15/633                   p=0.8758
+  attention_only    vs contrastive_only  delta=-0.08pp  11/12/639                   p=0.9864
+  attention_only    vs full              delta=-0.98pp  7/14/641                   p=0.1736
+  contrastive_only  vs full              delta=-0.91pp  9/15/638                   p=0.2207
+```
+
+**None of the six pairwise comparisons reach p<0.05.** This is the opposite conclusion from §6.9's corrected Dataset B result (`full` significantly beat `attention_only`, p=0.0052, on 19 seeds) — and it is reached with far more statistical power, not less, so the null result here is not simply an underpowered test the way §6.7's original concern anticipated. `attention_only` and `contrastive_only` post the two highest group-accuracy means (96.83% each) and `full` — the paper's own proposed configuration — posts the *lowest* mean of the four (95.92%), statistically indistinguishable from `baseline` (p=0.876). Two honest readings, both consistent with the evidence: the quality task (a single global good/bad textural judgement) may simply not have the fine-grained spatial structure cognitive attention and contrastive pretraining help with on multi-variety morphological discrimination; or the effect §6.9 found on Dataset B genuinely is task-specific rather than a general architectural advantage, and this experiment is the evidence for that boundary rather than a failure to reproduce it. Neither conclusion is asserted beyond what six comparisons and 662 paired groups support — reported as measured, not resolved beyond it.
+
+No served checkpoint changes as a result: the unified model already trains the quality head with attention+contrastive (`train_unified.py`'s architecture matches `full`), and this ablation's job was to test whether that architectural choice is *defensible* on this task, not to replace the deployed model with a lone-experiment checkpoint trained on the quality data alone (which has no variety head and would regress the rest of the served model's coverage).
+
+Reproduce: `python -m src.training.pretrain_contrastive --dataset quality --manifest data_processed/manifest_dataset_4_quality.csv --tag grouped`, then `python -m src.training.train_variety --dataset quality --experiment {baseline,attention_only,contrastive_only,full} --manifest data_processed/manifest_dataset_4_quality.csv [--encoder outputs/checkpoints/contrastive_encoder_quality_grouped.pt --tag {experiment}_grouped]`, then `python -m src.analysis.ablation_significance_quality`. Raw output: `outputs/metrics/variety_quality_*_grouped.json`, `outputs/metrics/ablation_significance_quality_grouped.json`.
+
+### 10.12 SanzalSima recall investigated — two standard remedies tried, neither helped, served model unchanged
+
+§6.10 measured SanzalSima at 60.6% test recall, 276 of 701 images misread as WangDataa, and called it "a genuine visual confusion... rather than an artefact." Two standard, targeted remedies were tried against that specific claim, both added to `train_unified.py` as opt-in flags so the default training path is unchanged:
+
+- **`--variety-class-weights`**: inverse-frequency class weighting on the variety head's `CrossEntropyLoss` (the same formula `train_variety.py` already uses for Datasets A/B), testing whether the confusion is a class-imbalance effect — SanzalSima has fewer distinct source seeds (33) than Bhihilifa (46) or WangDataa (48).
+- **`--focal-gamma 2.0`**: a from-scratch `FocalLoss` implementation (Lin et al. 2017; verified against `CrossEntropyLoss` at `gamma=0` before use), testing the different hypothesis that this is a *hard-example* problem — gradient concentrated on confidently-wrong predictions rather than on how rare the class is.
+
+Both were trained from the same contrastive-pretrained trunk as the served baseline (`contrastive_encoder_unified_unified.pt`), same architecture (`use_attention=True`), same every other hyperparameter, so the only variable is the loss function. Model selection used the project's existing validation criterion (mean of the two heads' F1, fixed before this investigation and unrelated to it) — never the test set:
+
+```
+                          best val mean F1   test variety acc   test variety F1   SanzalSima test recall
+baseline (served)              0.9733             0.8895             0.9316              60.6%
+class-weighted CE              0.9704             0.8817             0.9272              59.6%
+focal loss (gamma=2)           0.9689             0.8708             0.9212              59.2%
+```
+
+**Neither variant beat the baseline's validation score, so neither was a candidate for promotion — the served checkpoint (`unified_seed_model_best.pt`, unchanged) was never at risk regardless of its test numbers.** Both are reported here anyway because they bear directly on §6.10's claim: if the confusion were a fixable class-imbalance or hard-example artefact, at least one of two well-matched, standard remedies for those two specific failure modes should have moved SanzalSima recall up. Instead both moved it down slightly (59.6%, 59.2%), and both cost some Bhihilifa/WangDataa precision along the way (visible in each variant's own per-class report, `outputs/metrics/unified_varweighted_seed_model.json` / `unified_focal2_seed_model.json`). This is corroborating evidence for §6.10's original read, not new information that changes it: the SanzalSima/WangDataa confusion looks like a genuine visual similarity in the source imagery that a loss-reweighting scheme cannot buy back, rather than something the model is failing to see because of how the loss is shaped.
+
+What remains untried and is not claimed to be ruled out: stronger/different augmentation, a different crop strategy, and — the option §6.7/§8 already name as the actual binding constraint — more physical SanzalSima source seeds, since 33 behind however many augmented copies still caps how much the model can be shown of that class's true visual variety. None of the three was attempted this pass; the two experiments here targeted the two mechanisms (imbalance, hard examples) that a loss-function change alone can address, and both came back negative.
+
+Reproduce: `python -m src.training.train_unified --encoder outputs/checkpoints/contrastive_encoder_unified_unified.pt --variety-class-weights --tag unified_varweighted` and `... --focal-gamma 2.0 --tag unified_focal2`.
+
+### 10.13 Kernel-level disease dataset search — exhausted, same shape of gap as §10.7
+
+§10.2's visible-symptom classifier gates on GrainSpace M600 condition categories (AP, BN, FM, HD, MY, NOR, SD) and is explicit that these are a grader's visual categories, never a pathogen finding (`is_diagnosis: false`). This search asked whether a public dataset exists that would let the classifier go further — an RGB-only, kernel-level (not leaf-level) image paired with a lab- or expert-confirmed disease label — closing some of the domain-shift gap §10.2 already measures between GrainSpace crops and real uploads, or moving past "visual category" toward an actual pathogen identification.
+
+| Candidate | Why it doesn't close the gap |
+|---|---|
+| PlantVillage; Kaggle/Mendeley "Corn Leaf Disease" sets (Common Rust, Gray Leaf Spot, Blight, healthy) | All leaf photographs, not kernels — the same substitution this project's own literature survey (`02_LITERATURE_SURVEY_ANALYSIS.md`) and §5's original framing already rule out. A leaf disease and a kernel condition are different tissues with no established correspondence. |
+| Pearson & Wicklow, *Trans. ASABE* 49(4):1235 (2006), "Detection of Corn Kernels Infected by Fungi" — the primary reference for kernel-level fungal detection | Confirmed from the abstract itself: its working modality is reflectance spectra (550–1700 nm), X-ray, and multi-spectral visible+NIR transmittance — RGB color images were one of five inputs tried and were not the channel that worked. Its own headline result is the two NIR bands at 715 nm and 965 nm this project's `docs/04`/`10.2`/§4.3 already cite as the reason RGB can't reach pathogen diagnosis. No public image dataset is attached to a 2006 paper predating open-data norms. |
+| Single-kernel aflatoxin/fumonisin studies (UV–Vis–NIR reflectance to 1700 nm, laser-induced fluorescence hyperspectral imaging, ELISA-confirmed ground truth) | Every one of five independent papers surfaced uses a spectral range or fluorescence channel a consumer RGB camera cannot capture, confirmed to lab assay (ELISA/LC) rather than visual grading. None publishes a paired plain-RGB image set — the spectral data is the dataset. |
+| Mendeley `4n4xbnx8sr` (12-variety corn kernel RGB+hyperspectral, ~2,400 kernels), confirmed from its own text | Labels are "seed IDs and variety labels" only — no disease, defect, or condition annotation of any kind. Same shape of gap as Dataset A/B: real RGB kernel images, but the wrong label space. |
+| CornViT's Kaggle-sourced dataset (Zenodo `10.5281/zenodo.17693853`), confirmed from its own description | Purity (pure/impure), shape (flat/round), and embryo orientation (up/down) — morphological sorting categories, not disease or even general defect condition. Visually graded, but for a different question entirely. |
+| "Abnormal corn kernel" sets (broken/discolored/pure/silkcut-style categories) surfaced by the same search | The same whole-kernel visual-defect grading GrainSpace's own condition categories already cover (BN "broken," for instance) — not a new label space, and not a pathogen-specific one. |
+
+The pattern holds across every candidate, and it is the same pattern §10.7 found for defect-region masks: real kernel-level RGB datasets exist, but they label variety or gross physical condition, never a pathogen; and the research that does reach pathogen-level ground truth (lab-assayed aflatoxin/fumonisin, or the Pearson NIR-band result already cited) does it with a spectral or fluorescence channel outside what an RGB camera observes, confirmed from primary abstracts and dataset descriptions rather than secondary summaries, matching this project's own standing verification rule. This is not a reason to lower `is_diagnosis: false` or attempt a leaf-to-kernel or hyperspectral-to-RGB label transfer — either would put a label on the UI that the input image cannot support. §10.2's classifier and its abstention gate stand unchanged; the domain-shift gap it already measures and reports (0.712 coverage, accuracy deliberately null on real uploads for want of ground truth) remains the honest ceiling.
+
+### 10.14 Test suite closed out — 244/244, a genuine HTTP-layer gap found and closed
+
+Item 10 of the completion plan (the expanded test suite) is now closed as its own deliverable rather than an incidental byproduct of the sections above. `pytest tests/ -q` passes **244/244** across the 13 files under `tests/`, up from the 218 baseline this pass started from and the "40 passed" figure the original README carried from before Phase 2. The growth is not padding: every section from §10.1 onward added coverage for the capability it shipped (the foreign-object gate, the symptom classifier, the widened history schema, the orchestrator's cache, the calibration pipeline, and the two new history routes below), and none of it was added by loosening an existing assertion.
+
+One genuine, previously-undiscovered coverage gap was found and closed this pass: `backend/routes/history.py`'s HTTP layer — `DELETE /api/history/{id}` and `GET /api/history/export` — had no test at the route level, even though the service functions underneath them (`delete_analysis`, `export_history_csv` in `history_service.py`) were already well-tested. Grepping every test file for "delete"/"export" confirmed the absence rather than assuming coverage existed because the layer below was covered. Three tests were added to `tests/test_database_schema.py` against a throwaway sqlite fixture (`temp_db`, never the real `database/app.db`): delete-then-404-on-repeat, delete-of-an-unknown-id 404s, and export serves a real `text/csv` body with a `Content-Disposition` header and is not swallowed by the dynamic `/{analysis_id}` route declared after it (a genuine FastAPI route-ordering hazard the test now guards against directly, not just in principle).
+
+Consistent with the project's own established convention (confirmed by grep, not assumed): standalone GPU training/analysis scripts — `train_variety.py`, `pretrain_contrastive.py`, `ablation_significance.py`, `ablation_significance_quality.py`, `calibrate_unified.py`, and the new loss code in `train_unified.py` — are validated by running them and inspecting real results on real data, the same way §6 and §10.11–10.12's results were produced, not by unit tests against synthetic tensors. No test file was added for `FocalLoss` on that basis; its correctness is instead evidenced by the real training curves in §10.12 and its algebraic reduction to plain cross-entropy at `gamma=0`, checked by hand against Lin et al. 2017's own formula.
+
+`npm run build` in `frontend/` remains clean throughout; no frontend test regression is possible from this pass since none of it touched frontend code.
+
+---
+
+*This report reflects the actual, verified state of the project as of August 26, 2026 in §§1–9, September 4, 2026 in §10.1–10.6, September 5, 2026 in §10.7–10.8, and September 6, 2026 in §10.9–10.14. No capability listed as "done" here has been claimed without a corresponding test run, and no accuracy figure has been reported without the checkpoint and metrics file that produced it.*

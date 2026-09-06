@@ -120,6 +120,23 @@
   box-shadow: 0 0 8px rgba(244, 197, 66, 0.7);
 }
 
+/* Possible foreign object. Cyan and double-bordered -- deliberately outside the
+   red/amber defect language, because this is not a grade on a kernel. Red would
+   read as "bad seed"; the finding is "this may not be a seed". */
+.dbox.is-foreign,
+.dbox.is-foreign:hover,
+.dbox.is-foreign.is-active {
+  border-color: var(--cyan);
+  border-style: double;
+  border-width: 3px;
+  box-shadow: 0 0 0 1px rgba(8, 11, 10, 0.6), 0 0 20px var(--cyan-glow);
+}
+.dbox__flag--foreign {
+  background: var(--cyan);
+  border-color: #0a0d0b;
+  box-shadow: 0 0 9px rgba(72, 214, 198, 0.85);
+}
+
 .dbox__flag {
   position: absolute;
   top: -4px;

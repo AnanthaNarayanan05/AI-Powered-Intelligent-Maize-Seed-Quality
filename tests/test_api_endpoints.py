@@ -54,6 +54,103 @@ def test_system_info_never_claims_synthetic_defects_as_real():
     assert "unverified" in supported or "out-of-distribution" in supported
 
 
+def test_system_info_is_read_from_disk_not_hard_coded():
+    """Phase 14: the page used to recite a stored description of the platform, which
+    kept advertising "Dataset A: 3 classes" long after one 6-variety model replaced
+    both. Every model row must now come from an artefact that is actually here."""
+    import os
+
+    body = client.get("/api/system-info").json()
+    models = {m["key"]: m for m in body["models"]}
+    assert models, "no models reported"
+
+    for m in models.values():
+        assert m["status"] in ("ready", "available", "missing")
+        # status is a claim about this machine, so it must match this machine
+        on_disk = os.path.exists(m["checkpoint"])
+        assert (m["status"] != "missing") == on_disk, (
+            f"{m['key']} reported {m['status']} but exists={on_disk}"
+        )
+        if m["status"] == "missing":
+            assert m["metrics"] == [] or m["trained_at"] is None
+
+    # the served stack is exactly the models the pipeline actually runs. Phase 5
+    # added the fifth: the visible-symptom classifier ships as its own checkpoint
+    # rather than as a head on the unified model, because the fine-tune that made
+    # the symptom head usable measurably wrecked variety and quality in the same
+    # weights.
+    assert {k for k, m in models.items() if m["served"]} == {
+        "detection", "unified_seed_model", "quality_gate", "maize_identity_gate",
+        "visible_symptom_classifier",
+    }
+
+
+def test_system_info_reports_only_one_route_and_no_stale_dataset_claims():
+    """Two @app.get("/api/system-info") handlers were declared; Starlette matched the
+    first and silently dropped the second, so the file held two contradictory
+    descriptions with nothing to reveal the conflict."""
+    routes = [r for r in app.routes if getattr(r, "path", None) == "/api/system-info"]
+    assert len(routes) == 1, f"{len(routes)} handlers registered for /api/system-info"
+
+    text = " ".join(client.get("/api/system-info").json()["supported_capabilities"]).lower()
+    assert "dataset a" not in text and "dataset b" not in text, (
+        "the retired per-dataset variety models are still advertised as the stack"
+    )
+
+
+def test_system_info_never_leaks_the_gemini_key():
+    """The key is read from the environment and must never reach a response body."""
+    from backend.config import GEMINI_API_KEY
+
+    raw = client.get("/api/system-info").text
+    if GEMINI_API_KEY:
+        assert GEMINI_API_KEY not in raw
+    body = client.get("/api/system-info").json()
+    assert set(body["gemini"]) == {"configured", "model"}
+    assert isinstance(body["gemini"]["configured"], bool)
+
+
+def test_system_info_runtime_and_database_are_probed():
+    body = client.get("/api/system-info").json()
+
+    runtime = body["runtime"]
+    assert runtime["device"] in ("cuda", "cpu")
+    # a GPU name is reported only when CUDA genuinely answered
+    assert (runtime["gpu"] is not None) == runtime["cuda_available"]
+
+    db = body["database"]
+    assert db["status"] in ("connected", "not created", "unavailable")
+    if db["status"] == "connected":
+        assert set(db["tables"]) >= {"analyses", "detections"}
+        assert all(isinstance(v, int) for v in db["tables"].values())
+
+
+def test_system_info_reports_detection_config_from_the_file_it_runs_on():
+    """The Settings page shows these as read-only model configuration, so they have
+    to be the values this server loaded rather than numbers typed into a page. They
+    are also declared non-adjustable: the pipeline is a singleton, bound at first
+    load, and each threshold was chosen against a measurement in docs/09."""
+    from src.utils.config import load_config
+
+    inference = client.get("/api/system-info").json()["inference"]
+    assert inference["adjustable_at_runtime"] is False
+
+    expected = load_config()["detection"]
+    for key in ("conf_threshold", "nms_iou", "crop_context_pad", "iou_threshold"):
+        assert inference["detection"][key] == expected[key]
+
+
+def test_system_info_binds_each_gallery_to_the_encoder_that_built_it():
+    """Phase 13 provenance has to be visible on the page, not only in the sidecar."""
+    for idx in client.get("/api/system-info").json()["similarity_indices"]:
+        assert idx["status"] in ("built", "not built")
+        if idx["status"] == "built":
+            assert idx["encoder"], f"gallery {idx['dataset']} names no encoder"
+            # an evaluation image in the gallery would make retrieval self-confirming
+            assert idx["gallery_split"] == "train"
+            assert idx["gallery_size"] > 0
+
+
 def test_detect_rejects_non_image_file():
     r = client.post("/api/detect", files={"file": ("bad.txt", b"not an image", "text/plain")})
     assert r.status_code == 415

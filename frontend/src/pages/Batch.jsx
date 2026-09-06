@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Layers, Images, Sprout, Gauge, Trophy, RotateCcw, Sparkles } from "lucide-react";
+import { Layers, Images, Sprout, Gauge, Trophy, RotateCcw, Sparkles, HelpCircle } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
+import { UNAVAILABLE_LABEL, readCopilot } from "../lib/copilotResponse";
+import { isVarietyRow } from "../lib/seedHealth";
+import { useSettings } from "../lib/settings";
 import {
   Badge,
   Button,
@@ -22,7 +25,11 @@ const pretty = (s) => (s ? s.replace(/_/g, " ") : "—");
 
 export default function Batch() {
   const [files, setFiles] = useState([]);
-  const [dataset] = useState("unified");
+  // Same variety-model preference the Analyze page uses (Settings → Analysis).
+  // /api/analyze/batch takes no run_similarity flag, so that preference does not
+  // apply here and the Settings page says so rather than implying it does.
+  const { settings } = useSettings();
+  const dataset = settings.defaultModel;
   const [status, setStatus] = useState("idle"); // idle | running | done | error
   const [batch, setBatch] = useState(null);
   const [details, setDetails] = useState([]);
@@ -64,8 +71,8 @@ export default function Batch() {
     if (!batch?.batch_id) return;
     setSummary({ state: "loading", text: null });
     try {
-      const r = await api.summarizeBatch(batch.batch_id);
-      setSummary({ state: "ready", text: r.summary || r.explanation || r.text || "No summary returned." });
+      const { text, available } = readCopilot(await api.summarizeBatch(batch.batch_id));
+      setSummary({ state: available ? "ready" : "error", text });
     } catch (e) {
       setSummary({ state: "error", text: e.message });
     }
@@ -73,7 +80,7 @@ export default function Batch() {
 
   const stats = batch?.aggregate_stats;
   const confidences = details.flatMap((d) =>
-    (d.classifications || []).filter((c) => !c.is_synthetic_model).map((c) => c.confidence)
+    (d.classifications || []).filter(isVarietyRow).map((c) => c.confidence)
   );
   const topVariety = stats?.variety_distribution
     ? Object.entries(stats.variety_distribution).sort((a, b) => b[1] - a[1])[0]
@@ -93,7 +100,7 @@ export default function Batch() {
         }
       />
 
-      <GlassCard>
+      <GlassCard tier="primary">
         <UploadZone
           files={files}
           onFiles={(f) => {
@@ -210,7 +217,41 @@ export default function Batch() {
               </GlassCard>
             )}
 
-          <GlassCard accent="cyan">
+          {stats.foreign_object_flags && (
+            <GlassCard>
+              <SectionHeader
+                title="Foreign object review"
+                subtitle="A count of flags and of refusals, not a purity figure. The check measures how unlike known maize each detected object looks; it never identifies one, and an unflagged object is not certified as maize."
+                level={3}
+              />
+              <div className="ba__metrics">
+                <MetricCard
+                  icon={Sprout}
+                  tone="green"
+                  label="Objects scored"
+                  value={stats.foreign_object_flags.objects_scored}
+                />
+                <MetricCard
+                  icon={HelpCircle}
+                  tone="gold"
+                  label="Flagged for review"
+                  value={stats.foreign_object_flags.possible_foreign_objects}
+                  sub="not identified"
+                />
+                {/* Shown even at zero. Objects the check declined to examine are
+                    the ones a reader is most likely to assume were cleared. */}
+                <MetricCard
+                  icon={Gauge}
+                  tone="cyan"
+                  label="Not scored"
+                  value={stats.foreign_object_flags.objects_not_scored ?? 0}
+                  sub="outside the calibrated range"
+                />
+              </div>
+            </GlassCard>
+          )}
+
+          <GlassCard accent="cyan" tier="primary">
             <SectionHeader
               title="AI batch summary"
               subtitle="Gemini summarises the verified aggregate results above."
@@ -238,18 +279,22 @@ export default function Batch() {
             )}
             {(summary.state === "ready" || summary.state === "error") && (
               <div className={`ba__ai ${summary.state === "error" ? "is-error" : ""}`}>
-                <span className="ba__ailabel">AI-generated summary based on model analysis</span>
+                <span className="ba__ailabel">
+                  {summary.state === "error"
+                    ? UNAVAILABLE_LABEL
+                    : "AI-generated summary based on model analysis"}
+                </span>
                 <p>{summary.text}</p>
               </div>
             )}
           </GlassCard>
 
           {details.length > 0 && (
-            <GlassCard>
+            <GlassCard tier="primary">
               <SectionHeader title="Images in this batch" level={3} />
               <div className="ba__grid">
                 {details.map((d, i) => {
-                  const top = (d.classifications || []).find((c) => !c.is_synthetic_model);
+                  const top = (d.classifications || []).find(isVarietyRow);
                   return (
                     <motion.div
                       className="bcard"
@@ -272,7 +317,12 @@ export default function Batch() {
                       {top ? (
                         <>
                           <span className="bcard__variety">{pretty(top.predicted_class)}</span>
-                          <ConfidenceBar value={top.confidence} showValue label={null} />
+                          <ConfidenceBar
+                            value={top.confidence}
+                            calibrated={top.confidence_calibrated}
+                            showValue
+                            label={null}
+                          />
                         </>
                       ) : (
                         <span className="bcard__variety faint">No variety prediction</span>

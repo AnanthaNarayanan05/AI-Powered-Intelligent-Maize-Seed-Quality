@@ -2,9 +2,9 @@
 
     input image -> validate -> YOLO detect -> (no seeds? early return) ->
     bounding boxes + count -> crop each seed -> for each crop:
-        variety classification (dataset A or B model, selectable)
+        variety + quality classification (unified model; a/b kept for ablation)
         synthetic defect classification (clearly labeled synthetic)
-        embedding + similarity search
+        embedding + similarity search (same model's gallery index)
         Grad-CAM (best-effort, non-fatal if it fails)
     -> aggregate -> return structured, JSON-serializable result
 
@@ -14,12 +14,17 @@ clear API error rather than a crash (Phase 14/29 requirement).
 """
 from __future__ import annotations
 
+import json
 import os
+import statistics
 import uuid
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.pipeline import resolution_gate
+from src.registry import TaskUnavailableError, get_registry
+from src.similarity.embedding_index import IndexEncoderMismatch
 from src.utils.config import load_config, get_device
 from src.utils.logging_utils import get_logger
 
@@ -52,16 +57,59 @@ class AnalysisPipeline:
         self._detection_model = None
         self._variety_models: dict[str, object] = {}
         self._unified_model = None
+        self._calibration = None
         self._quality_reference = None
+        self._maize_reference = None
         self._synthetic_model = None
+        self._symptom_model = None
+        self._symptom_gate = None
         self._faiss_indices: dict[str, object] = {}
+        self._registry = None
         self._eval_transform = None
+        self._segmenters = {}
 
     @property
     def device(self):
         if self._device is None:
             self._device = get_device(self.cfg["device"]["prefer"])
         return self._device
+
+    @property
+    def registry(self):
+        """configs/model_registry.yaml — which model answers which task."""
+        if self._registry is None:
+            self._registry = get_registry()
+        return self._registry
+
+    def _record_for(self, task: str):
+        """The registry record that serves `task`, or a refusal.
+
+        The refusal is the point. A task no model is allowed to serve arrives
+        here as TaskUnavailableError and leaves as ModelNotAvailableError, which
+        the backend already turns into a clear API error rather than a crash.
+        That is a CAPABILITY refusal, and it is not the same fact as the
+        resolution refusal in resolution_gate: one says the platform cannot
+        answer this question at all, the other says it cannot answer it about
+        this particular image. They are reported separately everywhere.
+        """
+        try:
+            return self.registry.resolve(task)
+        except TaskUnavailableError as e:
+            raise ModelNotAvailableError(str(e)) from e
+
+    def _checkpoint_for(self, task: str) -> str:
+        """The checkpoint that serves `task`, resolved through the registry.
+
+        Model choice does not live in this file. A path spelled out here would be
+        a second answer to "which model serves this?" that drifts from the first
+        the moment a model is renamed or retrained -- and, worse, would happily
+        serve a task the registry deliberately refuses (the synthetic-defect
+        models declare `serves: []` precisely so they cannot answer a
+        real-world defect question). A task no model serves arrives here as
+        TaskUnavailableError and leaves as ModelNotAvailableError, which the
+        backend already turns into a clear API error rather than a crash.
+        """
+        return self._record_for(task).checkpoint
 
     # ---------- lazy loaders ----------
     def _get_eval_transform(self):
@@ -73,11 +121,7 @@ class AnalysisPipeline:
 
     def _get_detection_model(self):
         if self._detection_model is None:
-            weights_path = os.path.join(self.cfg["paths"]["checkpoints"], "detection_corn", "weights", "best.pt")
-            if not os.path.exists(weights_path):
-                raise ModelNotAvailableError(
-                    f"Detection model not found at {weights_path}. Run src/training/train_detection.py locally first."
-                )
+            weights_path = self._checkpoint_for("detect")
             try:
                 from ultralytics import YOLO
             except ImportError as e:
@@ -97,6 +141,12 @@ class AnalysisPipeline:
         'full' checkpoint is missing, fall back through the other trained
         experiments in order of research quality, and say clearly which one was
         actually used instead of mislabeling results."""
+        # Deliberately a filesystem scan rather than a registry lookup. The
+        # registry names the models the platform serves; these are ablation
+        # variants (baseline / attention_only / contrastive_only) that exist only
+        # to reproduce the comparison table, are never used to answer a user's
+        # question, and would clutter the registry with entries whose whole point
+        # is that they must not be served.
         candidates = [requested] + [e for e in self.EXPERIMENT_PREFERENCE if e != requested]
         for exp in candidates:
             ckpt_path = os.path.join(self.cfg["paths"]["checkpoints"], f"variety_{dataset}_{exp}_best.pt")
@@ -149,13 +199,9 @@ class AnalysisPipeline:
                     "Run: pip install torch torchvision"
                 ) from e
 
-            ckpt_path = os.path.join(self.cfg["paths"]["checkpoints"], "unified_seed_model_best.pt")
-            if not os.path.exists(ckpt_path):
-                raise ModelNotAvailableError(
-                    f"Unified seed model not found at {ckpt_path}. "
-                    f"Run: python -m src.training.train_unified "
-                    f"--encoder outputs/checkpoints/contrastive_encoder_unified_unified.pt"
-                )
+            # one record serves all three tasks; resolving any of them is the
+            # same assertion that this model is the platform's declared answer
+            ckpt_path = self._checkpoint_for("variety")
             state = torch.load(ckpt_path, map_location=self.device)
             model = UnifiedSeedModel(
                 state["variety_classes"], state["quality_classes"],
@@ -167,32 +213,286 @@ class AnalysisPipeline:
             self._unified_model = (model, state["variety_classes"], state["quality_classes"])
         return self._unified_model
 
+    def _get_calibration(self) -> dict:
+        """Phase 17: per-head temperature scaling, fit and verified by
+        src/analysis/calibrate_unified.py against validation, checked once
+        against test. Returns {"variety": T or None, "quality": T or None}.
+
+        A head's temperature is used only when the calibration file's recorded
+        checkpoint hash still matches the checkpoint this pipeline actually
+        loaded, and only when that run's test ECE cleared the bar chosen before
+        display was allowed. Either check failing serves that head's raw softmax
+        -- unchanged, not silently divided by a stale or unmeasured T -- because
+        a retrain that moves the logits also invalidates a temperature fit
+        against the old ones, and this must never be assumed still safe."""
+        if self._calibration is None:
+            self._calibration = {"variety": None, "quality": None}
+            path = os.path.join(self.cfg["paths"]["checkpoints"], "unified_calibration.json")
+            if os.path.exists(path):
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        payload = json.load(f)
+                    from src.registry.model_registry import checkpoint_sha256
+
+                    live_hash = checkpoint_sha256(self._checkpoint_for("variety"))
+                    if live_hash is not None and payload.get("checkpoint_sha256") == live_hash:
+                        for head in ("variety", "quality"):
+                            entry = payload.get(head) or {}
+                            if entry.get("accepted_for_display") and entry.get("temperature"):
+                                self._calibration[head] = float(entry["temperature"])
+                except (OSError, ValueError, KeyError):
+                    logger.warning("unified_calibration.json present but unreadable; serving raw softmax")
+        return self._calibration
+
     def _get_quality_reference(self):
         """Embeddings of the Mendeley training split plus the calibrated distance
         threshold, used to tell interpolation from extrapolation. Returns None if
         the reference was never built, in which case quality is still returned but
         carries no in-distribution claim."""
         if self._quality_reference is None:
-            path = os.path.join(self.cfg["paths"]["checkpoints"], "quality_reference.npz")
-            if not os.path.exists(path):
+            # absence is a supported state here, not an error, so the record is
+            # inspected rather than resolved -- resolve() raises on a missing
+            # checkpoint and quality grading is designed to continue without the gate
+            record = self.registry.get("quality_gate")
+            if not record.available:
                 self._quality_reference = False
             else:
+                path = record.checkpoint
                 z = np.load(path)
                 self._quality_reference = (z["reference"], float(z["threshold"]), int(z["k"]))
         return self._quality_reference or None
 
+    def _get_maize_reference(self):
+        """The Phase 4 foreign-object review aid: a maize-wide reference, the
+        held-out calibration a raw distance is restated against, and the review
+        threshold. Returns None when the reference was never built, in which case
+        seeds simply carry no verdict -- the absence of a flag is not a claim that
+        nothing is foreign."""
+        if self._maize_reference is None:
+            record = self.registry.get("maize_identity_gate")
+            if not record.available:
+                self._maize_reference = False
+            else:
+                z = np.load(record.checkpoint)
+                # Stored float16 to halve an 89 MB artifact; re-normalised here so
+                # the rounding does not bias the cosine. Measured to change none
+                # of 7,465 decisions.
+                ref = z["reference"].astype(np.float32)
+                ref /= np.linalg.norm(ref, axis=1, keepdims=True) + 1e-8
+                # Every performance figure served with a verdict is read out of
+                # the artifact that was measured, never written here. A rebuild
+                # that moves the numbers moves what the user is told, and one that
+                # cannot supply a figure makes the caveat drop it rather than
+                # quote a stale one.
+                self._maize_reference = {
+                    "reference": ref,
+                    "calibration": z["calibration"].astype(np.float32),
+                    "threshold": float(z["threshold"]),
+                    "review_budget": float(z["review_budget"]),
+                    "k": int(z["k"]),
+                    # Quadratic in log crop short side, fitted on held-out
+                    # calibration crops. A quarter of the raw distance was crop
+                    # resolution rather than maize identity; subtracting this is
+                    # what makes the calibrated budget hold on real uploads.
+                    "size_coef": z["size_coef"].astype(np.float64),
+                    # Below this the correction is extrapolating past the crops it
+                    # was fitted on, so no score is produced at all.
+                    "resolution_floor_px": int(z["resolution_floor_px"]),
+                    # The densest scene the gate was calibrated on. Packed scenes
+                    # fill every crop with fragments of neighbouring kernels, which
+                    # the size correction does not touch and the corpus does not
+                    # cover; past this count the gate declines rather than guesses.
+                    "scene_limit_objects": (int(z["scene_limit_objects"])
+                                            if "scene_limit_objects" in z else None),
+                    "measured_recall": (float(z["measured_recall"])
+                                        if "measured_recall" in z else None),
+                    "detection_rate": (float(z["detection_rate"])
+                                       if "detection_rate" in z else None),
+                    "enrichment": (float(z["enrichment"])
+                                   if "enrichment" in z else None),
+                }
+        return self._maize_reference or None
+
+    def _flag_foreign_object(self, emb, quality_distance=None, crop_px=None,
+                             scene_objects=None):
+        """How unlike known maize this object looks -- and nothing finer.
+
+        The primary output is ``atypicality``: the fraction of held-out maize
+        kernels this object is further from the reference than. A raw cosine
+        distance is meaningless to a reader; a percentile against real maize is
+        not. Above the review threshold the object is also marked for review.
+
+        This is a RANKED REVIEW AID, not a detector, and the distinction is a
+        finding rather than a hedge. At the shipped operating point the score
+        surfaces under a tenth of genuine maize, so at any realistic contamination
+        rate most surfaced objects are ordinary kernels. What it does well is
+        concentrate: the surfaced slice carries foreign objects at roughly nine
+        times the base rate, which is worth a grader's attention and is not a
+        detection.
+
+        ``crop_px`` is the crop's short side and is not optional in spirit. The
+        raw distance falls steadily with crop size -- R2 = 0.243 on size alone --
+        so an uncorrected score partly measures resolution, and did: it marked
+        63.5% of objects on real uploads against a 10% budget, almost all of them
+        small crops. The fitted size term is subtracted before anything is
+        compared to a threshold. Without a size the score cannot be corrected, so
+        no verdict is returned rather than an uncorrected one.
+
+        ``scene_objects`` is how many objects the detector found in the whole
+        image this crop came from, and it is the second limit of applicability.
+        On a densely packed upload -- 300 detections, every object ordinary maize
+        by inspection -- 42% were surfaced against a 5% budget, while calibration
+        crops of the same size behave at 6-8%. Packing, not size, is what differs:
+        the corpus this gate was calibrated on tops out at sixteen objects in an
+        image. Past that the verdict is unavailable.
+
+        It is FLAGGING, NOT CLASSIFICATION. It never says what an object is: this
+        project holds no stone, husk, cob-fragment or debris labels, so no such
+        claim is supportable. ``quality_distance`` is carried through as context
+        only -- an earlier build required it to agree before flagging, and that AND
+        rule was measured in the serving domain to catch strictly less than this
+        gate alone. See src/analysis/build_maize_reference.py for the sweep.
+        """
+        gate = self._get_maize_reference()
+        if not gate:
+            return None
+        k, threshold = gate["k"], gate["threshold"]
+        cal = gate["calibration"]
+        floor = gate["resolution_floor_px"]
+
+        scene_limit = gate.get("scene_limit_objects")
+
+        # Phase 8's principle applied to this gate, twice: a score produced outside
+        # the range it was calibrated on is not a measurement. Say so instead.
+        def unavailable(reason):
+            return {
+                "status": "unavailable",
+                "basis": "maize_identity_gate",
+                "is_classification": False,
+                "is_detector": False,
+                "resolution_floor_px": floor,
+                "scene_limit_objects": scene_limit,
+                "crop_px": int(crop_px) if crop_px is not None else None,
+                "scene_objects": (int(scene_objects)
+                                  if scene_objects is not None else None),
+                "caveat": "Foreign-object review unavailable -- " + reason,
+            }
+
+        if crop_px is None:
+            return unavailable("the object's size was not supplied, and the score "
+                               "cannot be corrected for it.")
+        if crop_px < floor:
+            return unavailable(
+                f"this object is {int(crop_px)}px across and the score is only "
+                f"calibrated down to {floor}px."
+            )
+        if scene_limit is not None and scene_objects is not None                 and scene_objects > scene_limit:
+            return unavailable(
+                f"this image holds {int(scene_objects)} detected objects and the "
+                f"score was calibrated on scenes of at most {scene_limit}. In "
+                "packed scenes each crop is filled with neighbouring kernels, "
+                "which this score has never been measured against."
+            )
+
+        e = emb / (np.linalg.norm(emb) + 1e-8)
+        sims = gate["reference"] @ e
+        distance = float(1.0 - np.partition(sims, -k)[-k:].mean())
+        # The shipped score. ``distance`` is kept for display, but nothing is
+        # compared against a threshold until the size trend comes out of it.
+        log_px = np.log(float(crop_px))
+        a, b, c = gate["size_coef"]
+        score = float(distance - (a + b * log_px + c * log_px * log_px))
+        atypicality = float(np.searchsorted(cal, score, side="right") / len(cal))
+        flagged = bool(score > threshold)
+
+        recall, detection = gate["measured_recall"], gate["detection_rate"]
+        # Catch rate among objects the detector found, times how often it finds
+        # one. The second factor is not a detail: an object YOLO misses is never
+        # scored by any threshold, so the aid's real reach is the product.
+        end_to_end = (round(recall * detection, 4)
+                      if recall is not None and detection is not None else None)
+
+        out = {
+            "status": "possible_foreign_object" if flagged else "known_maize",
+            "basis": "maize_identity_gate",
+            "atypicality": round(atypicality, 4),
+            "maize_score": round(score, 4),
+            "maize_distance": round(distance, 4),
+            "maize_threshold": round(threshold, 4),
+            "crop_px": int(crop_px),
+            "scene_objects": (int(scene_objects)
+                              if scene_objects is not None else None),
+            # The two limits ride on served verdicts as well as refused ones. A
+            # caller summarising a whole image reads the operating point off any
+            # one verdict, and a summary that reported the limits only when
+            # something was refused would describe the gate as boundless
+            # precisely when nothing had tested its boundaries.
+            "resolution_floor_px": floor,
+            "scene_limit_objects": scene_limit,
+            "quality_distance": (round(quality_distance, 4)
+                                 if quality_distance is not None else None),
+            "is_classification": False,
+            "is_detector": False,
+            "measured_recall": recall,
+            "detection_rate": detection,
+            "end_to_end_recall": end_to_end,
+            "enrichment": (round(gate["enrichment"], 2)
+                           if gate["enrichment"] is not None else None),
+            "review_budget": round(gate["review_budget"], 4),
+        }
+        if flagged:
+            out["caveat"] = (
+                "Marked for review: this object is more unlike known maize than "
+                f"{atypicality:.0%} of held-out maize kernels. It is not identified "
+                "-- the system has no data on stones, husk, cob fragments or debris "
+                "and cannot say what this is -- and it is not a detection: most "
+                "objects marked this way are ordinary maize."
+            )
+        else:
+            out["caveat"] = (
+                "Resembles known maize. The absence of a mark is not evidence that "
+                "an object is maize"
+                + (f": review at this setting surfaces about {end_to_end:.0%} of "
+                   "foreign objects end to end."
+                   if end_to_end is not None else
+                   ", and this build carries no measured catch rate to quote.")
+            )
+        return out
+
     def classify_unified(self, crop_image):
         """One forward pass, both predictions. Returns (variety, quality) dicts."""
+        return self.classify_unified_full(crop_image)[:2]
+
+    def classify_unified_full(self, crop_image, scene_objects=None):
+        """As classify_unified, plus the Phase 4 foreign-object verdict.
+
+        Kept separate so the long-standing two-value contract keeps working for
+        every existing caller; the flag rides on the same single forward pass.
+        Returns (variety, quality, foreign_object) where the third is None when
+        the gate is not installed.
+
+        ``scene_objects`` is optional and defaults to None so every existing
+        caller keeps working. Callers that hold the whole image should pass how
+        many objects were detected in it: the foreign-object gate needs it to know
+        whether the scene is one it was calibrated on.
+
+        Confidence and class_probabilities are temperature-scaled per Phase 17
+        when a verified calibration is available for that head (see
+        _get_calibration); ``confidence_calibrated`` says which. Temperature
+        scaling is a monotonic rescaling of the same logits, so predicted_class
+        is identical either way -- only the number is different.
+        """
         import torch
 
         model, v_classes, q_classes = self._get_unified_model()
+        calibration = self._get_calibration()
         tensor = self._get_eval_transform()(crop_image).unsqueeze(0).to(self.device)
         with torch.no_grad():
             embedding = model(tensor, mode="embedding")
             v_logits = model.variety_head(embedding)
             q_logits = model.quality_head(embedding)
-            v_probs = torch.softmax(v_logits, dim=1).cpu().numpy()[0]
-            q_probs = torch.softmax(q_logits, dim=1).cpu().numpy()[0]
+            v_probs = torch.softmax(v_logits / (calibration["variety"] or 1.0), dim=1).cpu().numpy()[0]
+            q_probs = torch.softmax(q_logits / (calibration["quality"] or 1.0), dim=1).cpu().numpy()[0]
             emb = embedding.cpu().numpy()[0]
 
         vi, qi = int(np.argmax(v_probs)), int(np.argmax(q_probs))
@@ -202,6 +502,7 @@ class AnalysisPipeline:
             "class_probabilities": {c: round(float(p), 4) for c, p in zip(v_classes, v_probs)},
             "model": "unified_seed_model",
             "is_synthetic_model": False,
+            "confidence_calibrated": calibration["variety"] is not None,
         }
         quality = {
             "predicted_class": q_classes[qi],
@@ -210,17 +511,20 @@ class AnalysisPipeline:
             "model": "unified_seed_model_quality",
             "is_synthetic_model": False,
             "label_source": "Mendeley EfficientMaize expert-assigned Good/Bad kernel labels",
+            "confidence_calibrated": calibration["quality"] is not None,
         }
 
         # Softmax confidence does not detect extrapolation -- it runs HIGHER on some
         # out-of-distribution imagery than on real test data. Distance to the
         # training representation does. See src/analysis/build_quality_reference.py.
+        quality_distance = None
         ref = self._get_quality_reference()
         if ref:
             reference, threshold, k = ref
             e = emb / (np.linalg.norm(emb) + 1e-8)
             sims = reference @ e
             dist = float(1.0 - np.partition(sims, -k)[-k:].mean())
+            quality_distance = dist
             quality["distribution_distance"] = round(dist, 4)
             quality["distribution_threshold"] = round(threshold, 4)
             quality["out_of_distribution"] = bool(dist > threshold)
@@ -230,7 +534,337 @@ class AnalysisPipeline:
                     "trained and validated on, so its grade is an extrapolation rather "
                     "than a measurement. Treat it as unverified."
                 )
-        return variety, quality
+
+        # The same embedding, read at a different operating point. The quality gate
+        # asks whether the grade is trustworthy and is deliberately loose; the
+        # foreign-object rule asks a harder question against a threshold calibrated
+        # on held-out maize. Both are honest about different things and neither
+        # substitutes for the other. The crop's short side goes with it because the
+        # score is corrected for crop size before it is thresholded.
+        foreign = self._flag_foreign_object(emb, quality_distance,
+                                            crop_px=min(crop_image.size),
+                                            scene_objects=scene_objects)
+        return variety, quality, foreign
+
+    def classify_unified_full_batch(self, crop_images: list, scene_objects=None) -> list:
+        """Phase 21. Same contract as classify_unified_full, called once for a
+        whole scene's crops instead of once per crop.
+
+        Measured cause, not a guess: profiling a 300-seed lot photo (docs/09
+        section 9's GPU pass) showed the unified head's batch-of-one forward
+        pass dominating per-seed cost -- the GPU sits mostly idle between tiny
+        single-crop launches. Stacking every crop into one tensor and running
+        the backbone and both heads ONCE removes exactly that idle time.
+        eval() mode makes this numerically a non-event: BatchNorm reads its
+        stored running statistics regardless of batch size, so a crop's variety
+        and quality distributions here match what classify_unified_full would
+        have returned for it alone to within GPU floating-point tolerance --
+        cuDNN can pick a different reduction kernel for batch-of-1 versus
+        batch-of-N, so results agree to ~1e-3, not bit-for-bit (see
+        test_a_batch_of_crops_matches_calling_the_single_crop_method_on_each_one).
+        The predicted class, and every quantity built on it, never moves.
+        Everything downstream of the embedding -- the distribution distance,
+        the foreign-object gate -- is cheap numpy per crop already and stays a
+        Python loop; only the two GPU forward passes are batched.
+        """
+        import torch
+
+        if not crop_images:
+            return []
+
+        model, v_classes, q_classes = self._get_unified_model()
+        calibration = self._get_calibration()
+        transform = self._get_eval_transform()
+        batch = torch.stack([transform(c) for c in crop_images]).to(self.device)
+        with torch.no_grad():
+            embedding = model(batch, mode="embedding")
+            v_probs = torch.softmax(
+                model.variety_head(embedding) / (calibration["variety"] or 1.0), dim=1
+            ).cpu().numpy()
+            q_probs = torch.softmax(
+                model.quality_head(embedding) / (calibration["quality"] or 1.0), dim=1
+            ).cpu().numpy()
+            emb = embedding.cpu().numpy()
+
+        ref = self._get_quality_reference()
+        results = []
+        for i, crop_image in enumerate(crop_images):
+            vi, qi = int(np.argmax(v_probs[i])), int(np.argmax(q_probs[i]))
+            variety = {
+                "predicted_class": v_classes[vi],
+                "confidence": round(float(v_probs[i][vi]), 4),
+                "class_probabilities": {c: round(float(p), 4) for c, p in zip(v_classes, v_probs[i])},
+                "model": "unified_seed_model",
+                "is_synthetic_model": False,
+                "confidence_calibrated": calibration["variety"] is not None,
+            }
+            quality = {
+                "predicted_class": q_classes[qi],
+                "confidence": round(float(q_probs[i][qi]), 4),
+                "class_probabilities": {c: round(float(p), 4) for c, p in zip(q_classes, q_probs[i])},
+                "model": "unified_seed_model_quality",
+                "is_synthetic_model": False,
+                "label_source": "Mendeley EfficientMaize expert-assigned Good/Bad kernel labels",
+                "confidence_calibrated": calibration["quality"] is not None,
+            }
+
+            quality_distance = None
+            if ref:
+                reference, threshold, k = ref
+                e = emb[i] / (np.linalg.norm(emb[i]) + 1e-8)
+                sims = reference @ e
+                dist = float(1.0 - np.partition(sims, -k)[-k:].mean())
+                quality_distance = dist
+                quality["distribution_distance"] = round(dist, 4)
+                quality["distribution_threshold"] = round(threshold, 4)
+                quality["out_of_distribution"] = bool(dist > threshold)
+                if quality["out_of_distribution"]:
+                    quality["caveat"] = (
+                        "This kernel does not resemble the images the quality model was "
+                        "trained and validated on, so its grade is an extrapolation rather "
+                        "than a measurement. Treat it as unverified."
+                    )
+
+            foreign = self._flag_foreign_object(emb[i], quality_distance,
+                                                crop_px=min(crop_image.size),
+                                                scene_objects=scene_objects)
+            results.append((variety, quality, foreign))
+        return results
+
+    # ---------- visible symptom ----------
+    def _get_symptom_gate(self, checkpoint: str) -> dict:
+        """The calibrated abstention rule that decides what this model may say.
+
+        Loaded from disk beside the checkpoint, never written here. The rule has
+        two independent parts -- which classes are validated at all, and the
+        softmax floor a retained prediction must clear -- and both were chosen on
+        the validation split by src/analysis/calibrate_symptom.py. Restating
+        either of them in this file would create a second answer that drifts from
+        the measured one the moment the model is recalibrated.
+
+        The gate carries the SHA-256 of the checkpoint it was calibrated against
+        and it is checked here. A threshold calibrated on one set of weights says
+        nothing about another set, so a mismatch is a refusal to serve rather than
+        a warning: the alternative is asserting categories under an operating
+        point that was never measured for them.
+        """
+        if self._symptom_gate is None:
+            from src.registry.model_registry import checkpoint_sha256
+
+            path = os.path.join(os.path.dirname(checkpoint), "symptom_gate.json")
+            if not os.path.exists(path):
+                raise ModelNotAvailableError(
+                    "the visible-symptom classifier is present but has not been "
+                    f"calibrated: {path} is missing. Run "
+                    "python -m src.analysis.calibrate_symptom. Until then the model "
+                    "has no measured operating point and is not served."
+                )
+            with open(path, encoding="utf-8") as f:
+                gate = json.load(f)
+            recorded = gate.get("checkpoint_sha256")
+            actual = checkpoint_sha256(checkpoint)
+            if recorded and recorded != actual:
+                raise ModelNotAvailableError(
+                    "the visible-symptom gate was calibrated against a different "
+                    f"checkpoint ({recorded[:12]} != {actual[:12]}). Its class "
+                    "eligibility and confidence floor were measured on weights "
+                    "that are no longer on disk, so they do not describe this "
+                    "model. Recalibrate before serving."
+                )
+            self._symptom_gate = gate
+        return self._symptom_gate
+
+    def _get_symptom_model(self):
+        """The specialised visible-symptom classifier, and only that.
+
+        This is deliberately NOT the unified model. The frozen-trunk head reached
+        0.2605 test macro-F1 on this task and a joint fine-tune reached 0.2343
+        while costing the quality head a measured 0.0096 F1; only fine-tuning the
+        whole trunk on symptom labels alone reached 0.5865, and doing that
+        destroys variety (0.9316 -> 0.5048) and quality (0.9721 -> 0.5800) in the
+        same weights. So the capability lives in its own checkpoint, the shipped
+        unified model is not touched at all, and this model is never asked for a
+        variety or a quality grade -- it would answer, and its answer would be
+        worthless. The registry enforces that by declaring `serves:
+        [visible_symptom]` and nothing else.
+
+        Returns (model, classes, gate).
+        """
+        if self._symptom_model is None:
+            try:
+                import torch
+                from src.models.unified_model import UnifiedSeedModel
+            except ImportError as e:
+                raise ModelNotAvailableError(
+                    "torch/torchvision is not installed in this environment. "
+                    "Run: pip install torch torchvision"
+                ) from e
+
+            ckpt_path = self._checkpoint_for("visible_symptom")
+            gate = self._get_symptom_gate(ckpt_path)
+            state = torch.load(ckpt_path, map_location=self.device)
+            model = UnifiedSeedModel(
+                state["variety_classes"], state["quality_classes"],
+                backbone_name=self.cfg["backbone"], pretrained=False,
+                use_attention=state.get("use_attention", True),
+                symptom_classes=state["symptom_classes"],
+            ).to(self.device)
+            model.load_state_dict(state["model_state_dict"])
+            model.eval()
+            self._symptom_model = (model, state["symptom_classes"], gate)
+        return self._symptom_model
+
+    def classify_symptom(self, crop_image) -> dict:
+        """The visible condition category a grader would assign this kernel, or a
+        stated refusal to assign one.
+
+        APPEARANCE, NOT AETIOLOGY. Every label here is the category an expert
+        GrainSpace grader filed a kernel under by looking at it. FM is the grader
+        category "fusarium & mildew" and a prediction of FM is not a fusarium
+        diagnosis; nothing in this project identifies a pathogen, a toxin or a
+        species, and no image-level label could support such a claim.
+
+        The result is gated twice before it is allowed to be a prediction. Two of
+        the seven classes are never asserted -- HD has 9 validation crops and SD
+        has 2, which is below the support at which an operating point can be
+        measured at all -- and a retained prediction must clear the calibrated
+        softmax floor. Failing either returns a withheld result carrying the
+        reason, not a guess and not a silent None: the caller has to be able to
+        tell "the model looked and would not commit" from "nothing ran".
+
+        The class that won the argmax is reported even when withheld, under a name
+        that cannot be mistaken for the answer, because a reader deciding whether
+        to send a kernel for manual grading is better served by knowing what the
+        model nearly said than by a blank.
+        """
+        import torch
+
+        model, classes, gate = self._get_symptom_model()
+        validated = gate["validated_classes"]
+        tau = float(gate["confidence_threshold"])
+        descriptions = gate.get("class_descriptions", {})
+
+        tensor = self._get_eval_transform()(crop_image).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            logits = model.forward_heads(tensor)["symptom"]
+            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+
+        idx = int(np.argmax(probs))
+        winner, confidence = classes[idx], float(probs[idx])
+        held_out = gate.get("test_at_threshold", {})
+
+        out = {
+            "basis": "visible_symptom_classifier",
+            "confidence_threshold": round(tau, 4),
+            "validated_classes": validated,
+            # Named this way on purpose. It is what the model would have said with
+            # no gate in front of it, and it is NOT the served answer when the
+            # status below is "withheld".
+            "argmax_class_before_gate": winner,
+            "argmax_confidence": round(confidence, 4),
+            "class_probabilities": {c: round(float(p), 4) for c, p in zip(classes, probs)},
+            # A grading category, not a diagnosis. Carried on the payload rather
+            # than only in prose so a consumer cannot present it as one by
+            # accident.
+            "is_diagnosis": False,
+            "label_source": ("GrainSpace M600 expert grader condition categories "
+                             "(visual grading, real maize kernels)"),
+            # The operating point rides on every verdict for the same reason the
+            # foreign-object limits do: a caller summarising an image reads it off
+            # whichever verdict it has.
+            "measured_coverage": held_out.get("coverage"),
+            "measured_accuracy": held_out.get("accuracy"),
+        }
+
+        if winner not in validated:
+            out["status"] = "withheld"
+            out["reason"] = "class_not_validated"
+            out["predicted_class"] = None
+            out["description"] = None
+            out["confidence"] = None
+            out["caveat"] = (
+                f"No visible-symptom category is reported for this kernel. The "
+                f"closest category the model holds is one it is not permitted to "
+                f"assert: " + gate["withheld_classes"].get(
+                    winner, f"{winner} is not a validated class") + ". Withheld "
+                "rather than reported -- a category the evidence cannot support is "
+                "worse than no category, because it gets acted on."
+            )
+            return out
+
+        if confidence < tau:
+            out["status"] = "withheld"
+            out["reason"] = "low_confidence"
+            out["predicted_class"] = None
+            out["description"] = None
+            out["confidence"] = None
+            out["caveat"] = (
+                f"No visible-symptom category is reported for this kernel. The "
+                f"model's best category scored {confidence:.2f}, below the {tau:.2f} "
+                "floor calibrated on held-out data. Below that floor its retained "
+                "predictions do not reach the accuracy this capability is served at."
+            )
+            return out
+
+        out["status"] = "reported"
+        out["reason"] = None
+        out["predicted_class"] = winner
+        out["description"] = descriptions.get(winner)
+        out["confidence"] = round(confidence, 4)
+        out["caveat"] = (
+            "Visible condition category assigned from appearance. It describes how "
+            "the kernel LOOKS to a grader and is not a pathogen, toxin or species "
+            "identification"
+            + (f". At this setting the capability names a category for "
+               f"{held_out['coverage']:.0%} of held-out kernels and is correct on "
+               f"{held_out['accuracy']:.0%} of those."
+               if held_out.get("coverage") is not None else ".")
+        )
+        return out
+
+    def symptom_status(self) -> dict:
+        """What this build is allowed to say about visible symptoms, image aside.
+
+        Reported once per analysis and reported even when nothing ran, because
+        "no model serves this task" and "the model looked at every kernel and
+        committed to none" are different facts and a reader who sees an empty
+        column needs to know which one produced it.
+        """
+        try:
+            record = self._record_for("visible_symptom")
+            model, classes, gate = self._get_symptom_model()
+        except ModelNotAvailableError as e:
+            return {
+                "status": "unavailable",
+                "reason": "no_served_model",
+                "message": str(e),
+                "model": None,
+            }
+        held_out = gate.get("test_at_threshold", {})
+        return {
+            "status": "available",
+            "reason": None,
+            "message": None,
+            "model": record.key,
+            "classes": classes,
+            "class_descriptions": gate.get("class_descriptions", {}),
+            "validated_classes": gate["validated_classes"],
+            # The silences are part of the specification, so they are published
+            # with the reason each class earned rather than left as an absence.
+            "withheld_classes": gate["withheld_classes"],
+            "confidence_threshold": gate["confidence_threshold"],
+            "selection_rule": gate.get("selection_rule"),
+            "held_out_coverage": held_out.get("coverage"),
+            "held_out_accuracy": held_out.get("accuracy"),
+            # The threshold was chosen on validation, which flatters it. Carried
+            # so the served figure is never quoted without the gap beside it.
+            "calibration_optimism": gate.get("calibration_transfer", {}).get("optimism"),
+            "is_diagnosis": False,
+            "note": ("VISIBLE DEFECT & SYMPTOM CLASSIFICATION. Categories describe "
+                     "kernel appearance as an expert grader recorded it. This is not "
+                     "disease diagnosis: no pathogen, toxin or species is identified "
+                     "anywhere in this system."),
+        }
 
     def _get_synthetic_model(self):
         if self._synthetic_model is None:
@@ -243,13 +877,18 @@ class AnalysisPipeline:
                 ) from e
             from src.data.synthetic_defect_generator import SYNTHETIC_CLASSES
 
-            ckpt_path = os.path.join(self.cfg["paths"]["checkpoints"], "synthetic_defect_classifier_best.pt")
-            if not os.path.exists(ckpt_path):
+            # Fetched by key, never resolved by task: this model declares
+            # serves: [] in the registry, so it can only be reached by a caller
+            # that explicitly asked for it (run_synthetic_defect=True) and gets a
+            # prediction stamped is_synthetic_model. registry.resolve() will not
+            # hand it to anyone asking about real defects.
+            record = self.registry.get("synthetic_defect_classifier")
+            if not record.present:
                 raise ModelNotAvailableError(
-                    f"Synthetic defect model not found at {ckpt_path}. "
-                    f"Run src/training/train_synthetic_defect.py locally first."
+                    f"Synthetic defect model not found at {record.checkpoint}. "
+                    f"Train it with: {record.trained_by}"
                 )
-            state = torch.load(ckpt_path, map_location=self.device)
+            state = torch.load(record.checkpoint, map_location=self.device)
             model = CognitiveAttentionClassifier(
                 num_classes=len(SYNTHETIC_CLASSES), backbone_name=state["backbone"],
                 pretrained=False, use_attention=state["use_attention"],
@@ -259,17 +898,37 @@ class AnalysisPipeline:
             self._synthetic_model = (model, SYNTHETIC_CLASSES)
         return self._synthetic_model
 
+    def _get_similarity_encoder(self, dataset: str):
+        """The model whose feature space a similarity query lives in.
+
+        This must be the same model that produced the prediction shown next to the
+        neighbours, otherwise the UI puts two unrelated feature spaces side by side.
+        """
+        from src.similarity.embedding_index import encoder_id
+
+        if dataset == "unified":
+            model, _v, _q = self._get_unified_model()
+            return model, encoder_id("unified")
+        experiment = self._resolve_experiment(dataset, "full")
+        model, _classes = self._get_variety_model(dataset, experiment)
+        return model, encoder_id(dataset, experiment)
+
     def _get_faiss_index(self, dataset: str):
         if dataset not in self._faiss_indices:
-            from src.similarity.embedding_index import EmbeddingIndex
+            from src.similarity.embedding_index import EmbeddingIndex, index_path
 
-            path = self.cfg["paths"][f"faiss_index_{dataset}"].rsplit(".index", 1)[0]
+            path = index_path(self.cfg, dataset)
             if not os.path.exists(path + ".faiss"):
                 raise ModelNotAvailableError(
-                    f"Similarity index for dataset '{dataset}' not found. Run src/similarity/build_index.py locally first."
+                    f"Similarity index for dataset '{dataset}' not found. "
+                    f"Run: python -m src.similarity.build_index --dataset {dataset}"
                 )
-            model, _classes = self._get_variety_model(dataset)
-            self._faiss_indices[dataset] = EmbeddingIndex.load(path, dim=model.feature_dim)
+            model, encoder = self._get_similarity_encoder(dataset)
+            # dim + encoder name are both checked: two different models can emit
+            # embeddings of the same width, so width alone proves nothing.
+            self._faiss_indices[dataset] = EmbeddingIndex.load(
+                path, dim=model.feature_dim, encoder=encoder
+            )
         return self._faiss_indices[dataset]
 
     # ---------- stages ----------
@@ -368,10 +1027,180 @@ class AnalysisPipeline:
                            "not verified real-world plant pathology data. See docs/06_SYNTHETIC_DEFECT_POLICY.md.",
         }
 
-    def embed_and_search(self, crop_image, dataset: str, top_k: int = 5):
+    # ---------- segmentation, resolution-gated ----------
+    def _get_segmenter(self, key: str):
+        """Load a segmentation checkpoint by key. Cached per key, like every other
+        model here. Channel names, input size and the per-channel thresholds tuned
+        on VAL all come out of the checkpoint -- none of them are assumed, because
+        a segmenter retrained with a different channel set would otherwise be read
+        with the previous run's meanings."""
+        if key not in self._segmenters:
+            import torch
+
+            from src.segmentation.model import DefectSegmenter
+
+            record = self.registry.get(key)
+            if not record.present:
+                raise ModelNotAvailableError(
+                    f"Segmentation model not found at {record.checkpoint}. "
+                    f"Train it with: {record.trained_by}"
+                )
+            state = torch.load(record.checkpoint, map_location=self.device, weights_only=False)
+            model = DefectSegmenter(
+                channel_names=state["channel_names"],
+                backbone_name=state["backbone"],
+                pretrained=False,
+                use_attention=state["use_attention"],
+            ).to(self.device)
+            model.load_state_dict(state["model_state"])
+            model.eval()
+            self._segmenters[key] = (model, state)
+        return self._segmenters[key]
+
+    def segment_defects(self, crop_image, bbox=None, model_key: str | None = None) -> dict:
+        """Pixel masks for one kernel -- or a documented refusal, never a guess.
+
+        Two gates stand in front of the model, in this order:
+
+          1. CAPABILITY. Without `model_key` the model is resolved by task, so a
+             task the registry refuses to serve stops here. Passing `model_key`
+             is the explicit opt-in used for ablation and tests; the result then
+             carries `is_synthetic_model` and the checkpoint's own label note, so
+             a synthetic-label mask can never be mistaken for a real one.
+          2. RESOLUTION. Below the measured floor no mask is produced at all --
+             not a low-confidence one, not a smaller one. The floor is an
+             information-loss ceiling (see resolution_gate), so a mask under it
+             would not be a worse measurement, it would be an unmeasured one.
+
+        `masks` holds numpy uint8 planes at the CROP's own pixel size, keyed by
+        channel name. They are arrays, not JSON: whatever serialises this response
+        must summarise or encode them rather than pass them through.
+        """
+        if model_key is None:
+            record = self._record_for("defect_segmentation")
+        else:
+            record = self.registry.get(model_key)
+
+        kernel_px = (
+            resolution_gate.kernel_px_from_bbox(bbox)
+            if bbox is not None
+            else resolution_gate.kernel_px_from_size(*crop_image.size)
+        )
+        verdict = resolution_gate.check(record, kernel_px, task="defect_segmentation")
+        if not verdict.sufficient:
+            return {
+                "available": False,
+                "reason": "insufficient_resolution",
+                "message": verdict.message,
+                "model": record.key,
+                "resolution": verdict.as_dict(),
+            }
+
+        import cv2
         import torch
 
-        model, _classes = self._get_variety_model(dataset)
+        from src.segmentation.dataset import IMAGENET_MEAN, IMAGENET_STD
+
+        model, state = self._get_segmenter(record.key)
+        size = int(state["image_size"])
+        channels = list(state["channel_names"])
+        # Thresholds were tuned on VAL per channel; 0.5 is only a fallback for a
+        # checkpoint saved before that sweep existed.
+        # float() rather than the stored numpy scalars: this dict travels out to
+        # callers that serialise it, and np.float64 is not JSON.
+        thresholds = {k: float(v) for k, v in (state.get("thresholds") or {}).items()}
+
+        source = np.array(crop_image.convert("RGB"))
+        h, w = source.shape[:2]
+        resized = cv2.resize(source, (size, size), interpolation=cv2.INTER_AREA)
+        x = (resized.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
+        x = torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))
+        x = x.unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            probs = torch.sigmoid(model(x))[0].cpu().numpy()
+
+        masks = {}
+        for ci, channel in enumerate(channels):
+            plane = (probs[ci] >= float(thresholds.get(channel, 0.5))).astype(np.uint8)
+            # Back to the crop's own pixels so the mask is measurable against the
+            # image it was cut from; NEAREST because a resized mask must stay binary.
+            masks[channel] = cv2.resize(plane, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        return {
+            "available": True,
+            "reason": None,
+            "message": None,
+            "model": record.key,
+            "is_synthetic_model": record.label_provenance == "synthetic",
+            "label_note": record.note,
+            "channels": channels,
+            "thresholds": thresholds,
+            "resolution": verdict.as_dict(),
+            "masks": masks,
+        }
+
+    def segmentation_status(self, kernel_px_values) -> dict:
+        """What this image allows to be said about defect segmentation.
+
+        Reported even when nothing ran, and especially then: two independent
+        things can stop segmentation and a reader needs to know which. "No model
+        is allowed to serve this task" is not fixable with a better photograph;
+        "your kernels are 12 px across" is. Collapsing them into one "unavailable"
+        would send people out to buy a camera for a capability that does not exist.
+
+        The numbers here are measurements of the submitted image, not claims about
+        a mask -- no mask is produced anywhere in this method.
+        """
+        floor = resolution_gate.declared_floor(self.registry, "defect_segmentation")
+        minimum = floor["min_kernel_px"] if floor else None
+        measured = sorted(int(k) for k in kernel_px_values)
+        below = [k for k in measured if minimum is not None and k < minimum]
+
+        resolution = {
+            "min_kernel_px": minimum,
+            "source": floor["source"] if floor else None,
+            "seeds_measured": len(measured),
+            "seeds_below_floor": len(below),
+            "kernel_px_median": int(statistics.median(measured)) if measured else None,
+            "kernel_px_min": measured[0] if measured else None,
+            "kernel_px_max": measured[-1] if measured else None,
+        }
+
+        try:
+            record = self._record_for("defect_segmentation")
+        except ModelNotAvailableError as e:
+            return {
+                "status": "unavailable",
+                "reason": "no_served_model",
+                "message": str(e),
+                "model": None,
+                "resolution": resolution,
+            }
+
+        if measured and len(below) == len(measured):
+            status, reason = "unavailable", "insufficient_resolution"
+        elif below:
+            status, reason = "partial", "insufficient_resolution"
+        else:
+            status, reason = "available", None
+
+        return {
+            "status": status,
+            "reason": reason,
+            "message": None if reason is None else resolution_gate.SEGMENTATION_UNAVAILABLE,
+            "model": record.key,
+            "resolution": resolution,
+        }
+
+    def embed_and_search(self, crop_image, dataset: str, top_k: int = 5):
+        """Nearest gallery images in the encoder's feature space.
+
+        VISUAL SIMILARITY only: a neighbour's label describes that neighbour, and is
+        never merged into the query's own prediction.
+        """
+        import torch
+
+        model, _encoder = self._get_similarity_encoder(dataset)
         tf = self._get_eval_transform()
         tensor = tf(crop_image).unsqueeze(0).to(self.device)
         with torch.no_grad():
@@ -379,20 +1208,77 @@ class AnalysisPipeline:
         index = self._get_faiss_index(dataset)
         return index.search(embedding, top_k)
 
-    def generate_gradcam(self, crop_image, dataset: str, experiment: str = "full"):
-        import torch
-        from src.explainability.gradcam import GradCAM
+    GRADCAM_HEADS = ("variety", "quality", "symptom")
 
-        model, _classes = self._get_variety_model(dataset, experiment)
-        tf = self._get_eval_transform()
-        tensor = tf(crop_image).unsqueeze(0).to(self.device)
-        tensor.requires_grad_(False)
-        cam_engine = GradCAM(model)
-        cam, class_idx = cam_engine.generate(tensor)
-        return cam, class_idx
+    def generate_gradcam(
+        self,
+        crop_image,
+        dataset: str = "unified",
+        experiment: str = "full",
+        head: str = "variety",
+        out_size: tuple[int, int] | None = None,
+    ):
+        """Grad-CAM for the model that actually produced the served prediction.
+
+        Returns (cam, meta). `dataset` defaults to "unified" for the same reason
+        analyze_image does: the unified model is what the platform serves, and a
+        heatmap taken from variety_a_full_best.pt would be explaining a *different*
+        model's decision than the one displayed beside it. "a"/"b" stay reachable so
+        the ablation figures in docs/09 remain reproducible.
+
+        The quality head is only available on the unified model — the per-dataset
+        checkpoints have no quality head to differentiate, so asking for one is an
+        error rather than a silent fall back to variety.
+        """
+        from src.explainability.gradcam import GradCAM, target_layer_name
+
+        if head not in self.GRADCAM_HEADS:
+            raise ValueError(f"head must be one of {self.GRADCAM_HEADS}, got {head!r}")
+
+        if dataset == "unified" and head == "symptom":
+            # The symptom head lives in its own checkpoint, so its heatmap has to
+            # come from those weights. A CAM taken off the unified trunk would be
+            # explaining a model that never made this prediction -- and cannot,
+            # since it has no symptom head at all.
+            model, classes, _gate = self._get_symptom_model()
+            model_name = "visible_symptom_classifier"
+            experiment_used = None
+        elif dataset == "unified":
+            model, classes, quality_classes = self._get_unified_model()
+            classes = classes if head == "variety" else quality_classes
+            model_name = "unified_seed_model" if head == "variety" else "unified_seed_model_quality"
+            experiment_used = None
+        else:
+            if head != "variety":
+                raise ValueError(
+                    f"the '{dataset}' variety checkpoint has only a variety head; "
+                    f"head={head!r} is not available on it. Use dataset='unified'."
+                )
+            experiment_used = self._resolve_experiment(dataset, experiment)
+            model, classes = self._get_variety_model(dataset, experiment_used)
+            model_name = f"variety_{dataset}_{experiment_used}"
+
+        tensor = self._get_eval_transform()(crop_image).unsqueeze(0).to(self.device)
+        cam, class_idx = GradCAM(model, head=head).generate(tensor, out_size=out_size)
+
+        meta = {
+            "model": model_name,
+            "head": head,
+            "target_layer": target_layer_name(model),
+            "predicted_class": classes[class_idx],
+            "class_index": class_idx,
+            "experiment": experiment_used,
+            "is_segmentation_mask": False,
+            "note": (
+                "Grad-CAM attention heatmap over the post-attention feature map. It "
+                "shows which regions influenced this prediction. It is NOT a "
+                "segmentation mask and NOT a defect area measurement."
+            ),
+        }
+        return cam, meta
 
     # ---------- orchestration ----------
-    def analyze_image(self, image_path: str, variety_dataset: str = "unified", run_similarity: bool = True, run_synthetic_defect: bool = False, top_k: int = 5) -> dict:
+    def analyze_image(self, image_path: str, variety_dataset: str = "unified", run_similarity: bool = True, run_synthetic_defect: bool = False, run_symptom: bool = True, top_k: int = 5) -> dict:
         """variety_dataset defaults to "unified": one model, six varieties, plus a
         real quality head. "a"/"b" still select the older single-dataset models so
         the ablation results in docs/09 remain reproducible, but they are not what
@@ -410,6 +1296,8 @@ class AnalysisPipeline:
 
         if len(detections) == 0:
             result["warnings"].append("No seeds detected above the confidence threshold.")
+            result["segmentation"] = self.segmentation_status([])
+            result["visible_symptom"] = self.symptom_status()
             return result
 
         for i, det in enumerate(detections):
@@ -418,15 +1306,26 @@ class AnalysisPipeline:
                 "seed_index": i,
                 "bbox": det["bbox"],
                 "detection_confidence": det["confidence"],
+                # Measured, not requested: how many pixels across this kernel
+                # actually is, by the same short-side rule the resolution floor
+                # was measured with. Carried on every seed because it decides
+                # per seed which pixel-level answers are available for it.
+                "kernel_px": resolution_gate.kernel_px_from_bbox(det["bbox"]),
             }
             if variety_dataset == "unified":
                 try:
-                    variety, quality = self.classify_unified(crop)
+                    # The scene's object count travels with every crop: a packed
+                    # image is one the foreign-object gate was never calibrated on,
+                    # and it has to be able to say so rather than score anyway.
+                    variety, quality, foreign = self.classify_unified_full(
+                        crop, scene_objects=len(detections))
                     seed_entry["variety_prediction"] = variety
                     seed_entry["quality_prediction"] = quality
+                    seed_entry["foreign_object"] = foreign
                 except ModelNotAvailableError as e:
                     seed_entry["variety_prediction"] = None
                     seed_entry["quality_prediction"] = None
+                    seed_entry["foreign_object"] = None
                     result["warnings"].append(str(e))
             else:
                 try:
@@ -434,6 +1333,18 @@ class AnalysisPipeline:
                 except ModelNotAvailableError as e:
                     seed_entry["variety_prediction"] = None
                     result["warnings"].append(str(e))
+
+            if run_symptom:
+                # A second forward pass on the same crop, because the capability
+                # lives in a second checkpoint. Precedented -- detection, the
+                # quality gate, the maize-identity gate and the segmenters are all
+                # separate models -- and the cost buys not damaging the variety and
+                # quality heads that already work.
+                try:
+                    seed_entry["symptom_prediction"] = self.classify_symptom(crop)
+                except ModelNotAvailableError as e:
+                    seed_entry["symptom_prediction"] = None
+                    result["warnings"].append(f"Visible-symptom classification unavailable: {e}")
 
             if run_synthetic_defect:
                 try:
@@ -443,16 +1354,31 @@ class AnalysisPipeline:
                     result["warnings"].append(str(e))
 
             if run_similarity:
+                # Search the gallery belonging to the model that just made the
+                # prediction. There is deliberately no fallback to another dataset's
+                # index: neighbours drawn from a 3-variety gallery cannot describe a
+                # kernel the 6-variety model just classified.
                 try:
-                    # FAISS indices were built per source dataset; the unified model
-                    # has no index of its own yet, so similarity falls back to A.
-                    sim_ds = "a" if variety_dataset == "unified" else variety_dataset
-                    seed_entry["similarity_results"] = self.embed_and_search(crop, sim_ds, top_k)
-                except ModelNotAvailableError as e:
+                    seed_entry["similarity_results"] = self.embed_and_search(
+                        crop, variety_dataset, top_k
+                    )
+                except (ModelNotAvailableError, IndexEncoderMismatch, KeyError) as e:
                     seed_entry["similarity_results"] = []
-                    result["warnings"].append(str(e))
+                    result["warnings"].append(f"Similarity unavailable: {e}")
 
             result["seeds"].append(seed_entry)
+
+        # Stated whether or not anything pixel-level ran, and separating the two
+        # reasons it might not have: no model is allowed to serve the task, or the
+        # kernels in this image are below the measured floor. No mask is produced
+        # here in either case.
+        result["segmentation"] = self.segmentation_status(
+            [s["kernel_px"] for s in result["seeds"]]
+        )
+        # Stated once per image rather than repeated on every kernel: which
+        # categories this build may assert, which it never will and why, and the
+        # held-out coverage/accuracy the gate actually delivers.
+        result["visible_symptom"] = self.symptom_status()
 
         result["warnings"] = list(dict.fromkeys(result["warnings"]))  # dedupe, preserve order
         return result

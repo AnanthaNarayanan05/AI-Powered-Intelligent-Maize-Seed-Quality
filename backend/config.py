@@ -10,7 +10,9 @@ from dotenv import load_dotenv
 load_dotenv()  # loads .env if present; real key must never be committed (see .gitignore)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+# `or` rather than a getenv default: copying .env.example gives GEMINI_MODEL an
+# empty value, and an empty model name reaches the API as a 404, not a default.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.6-flash"
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "data_processed/uploads")
 MAX_UPLOAD_MB = 15

@@ -6,13 +6,15 @@ import { motion } from "framer-motion";
 import { AlertTriangle, Inbox, Loader2 } from "lucide-react";
 import "./ui.css";
 
-/* ---------- GlassCard ---------- */
-export function GlassCard({ children, className = "", accent, hover = false, ...rest }) {
+/* ---------- GlassCard ----------
+   tier: "secondary" (default, cards) | "primary" (major panels) | "floating"
+   (dropdowns/tooltips/modals) — see ui.css for the visual recipe each maps to. */
+export function GlassCard({ children, className = "", accent, tier, hover = false, ...rest }) {
   return (
     <div
       className={`glass-card ${hover ? "glass-card--hover" : ""} ${
         accent ? `glass-card--${accent}` : ""
-      } ${className}`}
+      } ${tier && tier !== "secondary" ? `glass-card--${tier}` : ""} ${className}`}
       {...rest}
     >
       {children}
@@ -104,7 +106,17 @@ export function ProvenanceBadge({ synthetic }) {
 }
 
 /* ---------- ConfidenceBar ---------- */
-export function ConfidenceBar({ value, tone, label, showValue = true, delay = 0 }) {
+// Phase 17: a bar renders only for a number this project has actually verified
+// means what it says -- reliability diagram, ECE and Brier score measured on
+// held-out data, via src/analysis/calibrate_unified.py. `calibrated` must be
+// threaded from that prediction's own confidence_calibrated field (variety and
+// quality predictions carry it; nothing else does yet), and defaults to false
+// so a call site that forgets to pass it gets the safe, hidden behaviour
+// instead of quietly starting to show an unmeasured number. The visible-symptom
+// classifier's confidence is real but was never put through this measurement,
+// so it stays hidden until it earns the same treatment.
+export function ConfidenceBar({ value, tone, label, showValue = true, delay = 0, calibrated = false }) {
+  if (!calibrated) return null;
   const pct = Math.max(0, Math.min(1, value ?? 0));
   // Low confidence must look different from high confidence, not just read differently.
   const auto = pct >= 0.85 ? "ok" : pct >= 0.6 ? "warn" : "error";

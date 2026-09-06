@@ -1,0 +1,15 @@
+.seed-hero {
+  position: absolute;
+  inset: 0;
+}
+.seed-hero canvas {
+  display: block;
+}
+
+/* Static fallback for reduced-motion / lazy-load: same palette, no WebGL. */
+.seed-hero--static {
+  background:
+    radial-gradient(circle at 50% 46%, rgba(244, 197, 66, 0.4) 0%, rgba(244, 197, 66, 0.1) 22%, transparent 52%),
+    radial-gradient(circle at 50% 50%, rgba(72, 214, 198, 0.07) 0%, transparent 62%);
+  border-radius: var(--r-xl);
+}

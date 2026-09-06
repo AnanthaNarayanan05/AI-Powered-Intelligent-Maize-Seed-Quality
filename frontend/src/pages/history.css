@@ -74,6 +74,18 @@
   white-space: nowrap;
 }
 
+.hi__export {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.hi__deleteerr {
+  padding: var(--sp-3) var(--sp-4);
+}
+
 .hi__grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
@@ -83,6 +95,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
+}
+
+.hi__cell.is-open {
+  grid-column: 1 / -1;
 }
 
 .hcard {
@@ -194,6 +210,65 @@
 .hcard__id {
   font-size: 0.6rem;
   word-break: break-all;
+}
+
+.hcard__deletebar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--glass-border);
+}
+.hcard__deleteconfirm {
+  font-size: var(--text-xs);
+  color: var(--warn);
+  flex: 1;
+  min-width: 160px;
+}
+
+.hcard__seeds-drilldown {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  cursor: default;
+}
+
+.hcard__seeddetail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-3);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-md);
+  background: var(--bg-1);
+}
+.hcard__seeddetaillabel {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.hcard__seedrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.hcard__seedval {
+  font-size: var(--text-sm);
+  color: var(--ink);
+  text-transform: capitalize;
+}
+.hcard__seedval--warn {
+  color: var(--warn);
+}
+.hcard__seedforeign {
+  font-size: var(--text-xs);
+  color: var(--cyan);
+  line-height: 1.5;
 }
 
 @media (max-width: 620px) {

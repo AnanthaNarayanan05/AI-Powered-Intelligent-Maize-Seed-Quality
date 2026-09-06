@@ -5,6 +5,11 @@
    ============================================================ */
 
 :root {
+  /* Dark-only design, no light variant — tells the browser to render native
+     form chrome (select popups, checkboxes, scrollbars) with the dark UA
+     palette instead of defaulting to light regardless of OS theme. */
+  color-scheme: dark;
+
   /* ---- surfaces: obsidian base, layered upward ---- */
   --bg-base: #080b0a;
   --bg-1: #101512;
@@ -12,11 +17,17 @@
   --bg-3: #18201c;
   --bg-elevated: #1c2521;
 
-  /* ---- glass ---- */
-  --glass-bg: rgba(20, 26, 23, 0.72);
+  /* ---- glass hierarchy ----
+     secondary = default card surface (metrics, module cards, list rows)
+     primary   = major structural panels (sidebar, topbar, hero copy, chat)
+     floating  = layered-above-content surfaces (dropdowns, tooltips, modals) */
+  --glass-bg: rgba(18, 24, 21, 0.68);
+  --glass-bg-primary: rgba(11, 17, 14, 0.64);
+  --glass-bg-floating: rgba(13, 19, 16, 0.58);
   --glass-border: rgba(245, 242, 232, 0.08);
   --glass-border-strong: rgba(245, 242, 232, 0.14);
-  --glass-blur: 14px;
+  --glass-blur: 16px;
+  --glass-blur-strong: 26px;
 
   /* ---- accents ----
      gold  = results, seed intelligence, primary actions, high-value metrics
@@ -24,6 +35,7 @@
      cyan  = AI, embeddings, Gemini, neural activity                        */
   --gold: #f4c542;
   --gold-dim: #c9a233;
+  --gold-bright: #f7d97a;
   --gold-glow: rgba(244, 197, 66, 0.18);
   --green: #6fbf73;
   --green-dim: #4e8f52;
@@ -31,6 +43,10 @@
   --cyan: #48d6c6;
   --cyan-dim: #2f9e92;
   --cyan-glow: rgba(72, 214, 198, 0.16);
+
+  /* ---- chart-only accents (not part of the core identity triad) ---- */
+  --chart-slate: #8fa8c8;
+  --chart-amber-dark: #c98a1b;
 
   /* ---- state ---- */
   --danger: #e8705a;
@@ -44,8 +60,8 @@
   --ink-faint: #6f7d72;
 
   /* ---- type ---- */
-  --font-sans: "Inter", "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", Consolas, monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.85rem;
@@ -89,6 +105,46 @@
   --content-max: 1560px;
 }
 
+/* ============================================================
+   APPEARANCE PREFERENCES
+   Set on <html> by the settings store (src/lib/settings.jsx).
+   Each block re-declares tokens and nothing else — no component
+   stylesheet knows these attributes exist, so a preference reaches
+   every page through the cascade it already uses. The default value
+   of each preference is the :root set above and needs no block.
+   ============================================================ */
+
+/* Panels lean transparent: more photograph, less surface. */
+:root[data-glass="subtle"] {
+  --glass-bg: rgba(18, 24, 21, 0.5);
+  --glass-bg-primary: rgba(11, 17, 14, 0.46);
+  --glass-bg-floating: rgba(13, 19, 16, 0.44);
+  --glass-blur: 10px;
+  --glass-blur-strong: 18px;
+}
+
+/* Panels lean solid: maximum text contrast over a busy photograph. Still
+   translucent — the background stays visible, just quieter. */
+:root[data-glass="strong"] {
+  --glass-bg: rgba(18, 24, 21, 0.78);
+  --glass-bg-primary: rgba(11, 17, 14, 0.74);
+  --glass-bg-floating: rgba(13, 19, 16, 0.7);
+  --glass-blur: 22px;
+  --glass-blur-strong: 34px;
+}
+
+/* Tighter rhythm for smaller screens and longer working sessions. Only the
+   layout-scale steps shrink; --sp-1/--sp-2 are icon-and-label gaps that stop
+   reading as deliberate below their current size. */
+:root[data-density="compact"] {
+  --sp-3: 0.6rem;
+  --sp-4: 0.8rem;
+  --sp-5: 1.1rem;
+  --sp-6: 1.5rem;
+  --sp-7: 2.1rem;
+  --sp-8: 2.8rem;
+}
+
 /* Honour the OS reduced-motion preference everywhere, including the 3D hero. */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -99,4 +155,15 @@
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Same rules, reached by in-app preference instead of OS setting — for people
+   whose OS has no such control, or who want it here only. */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
 }

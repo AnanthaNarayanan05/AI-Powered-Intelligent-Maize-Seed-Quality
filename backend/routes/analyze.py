@@ -79,6 +79,16 @@ async def analyze_batch(
     pipeline = get_pipeline()
     analysis_ids, variety_dist, quality_dist, confidences = [], {}, {}, []
     successful, failed = 0, 0
+    # Counted, not inferred. Objects the gate could not score at all are kept
+    # apart from those it scored and passed, because "not flagged" and "not
+    # examined" are different statements and only one of them is about the object.
+    flagged, scored, not_scored = 0, 0, 0
+    # Same accounting for visible symptoms, and for the same reason: a kernel the
+    # classifier declined to categorise must not be counted into any category,
+    # least of all NOR. The withheld tally is reported beside the named ones so a
+    # batch where the model mostly abstained cannot read as a batch of clean seed.
+    symptom_dist: dict[str, int] = {}
+    symptom_withheld: dict[str, int] = {}
 
     for file in files:
         try:
@@ -102,6 +112,20 @@ async def analyze_batch(
                 if seed.get("synthetic_defect_prediction"):
                     sp = seed["synthetic_defect_prediction"]
                     quality_dist[sp["predicted_class"]] = quality_dist.get(sp["predicted_class"], 0) + 1
+                sp = seed.get("symptom_prediction")
+                if sp:
+                    if sp["status"] == "reported":
+                        name = sp["predicted_class"]
+                        symptom_dist[name] = symptom_dist.get(name, 0) + 1
+                    else:
+                        symptom_withheld[sp["reason"]] = symptom_withheld.get(sp["reason"], 0) + 1
+                if seed.get("foreign_object"):
+                    status = seed["foreign_object"]["status"]
+                    if status == "unavailable":
+                        not_scored += 1
+                    else:
+                        scored += 1
+                        flagged += status == "possible_foreign_object"
         except (InvalidImageError, ModelNotAvailableError) as e:
             failed += 1
             logger.warning(f"Batch item failed: {e}")
@@ -117,6 +141,26 @@ async def analyze_batch(
         "quality_distribution": quality_dist,
         "average_confidence": avg_conf,
         "low_confidence_count": sum(1 for c in confidences if c < 0.6),
+        # A flag count, not a purity figure. It says how many detected objects did
+        # not resemble known maize; it does not say what they are, and it does not
+        # certify the remainder, which is why no percentage is derived here.
+        "foreign_object_flags": {
+            "objects_scored": scored,
+            "possible_foreign_objects": flagged,
+            # Objects below the gate's measured resolution floor, or in scenes
+            # denser than any it was calibrated on. Reported so a batch of
+            # tightly packed photographs reads as unexamined rather than clean.
+            "objects_not_scored": not_scored,
+            "is_classification": False,
+        } if scored or not_scored else None,
+        # Grading categories, not diagnoses, and the count of kernels the gate
+        # would not categorise is part of the result rather than a footnote to it.
+        "visible_symptoms": {
+            "kernels_scored": sum(symptom_dist.values()) + sum(symptom_withheld.values()),
+            "category_counts": symptom_dist,
+            "withheld_counts": symptom_withheld,
+            "is_diagnosis": False,
+        } if symptom_dist or symptom_withheld else None,
     }
 
     batch_id = str(uuid.uuid4())

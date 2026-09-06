@@ -11,22 +11,11 @@
    prefers-reduced-motion the canvas is not mounted at all and a static CSS
    fallback renders instead.
    ============================================================ */
-import { Suspense, useMemo, useRef, useState, useEffect } from "react";
+import { Suspense, useMemo, useRef } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-
-function usePrefersReducedMotion() {
-  const [reduced, setReduced] = useState(
-    () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const on = (e) => setReduced(e.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return reduced;
-}
+import { usePrefersReducedMotion } from "../hooks/usePrefersReducedMotion";
+import "./seedhero.css";
 
 /** A maize kernel: sphere squashed into the broad teardrop of a dent-corn seed. */
 function KernelMesh() {

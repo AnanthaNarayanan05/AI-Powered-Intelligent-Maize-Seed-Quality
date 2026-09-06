@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Search, ChevronLeft, ChevronRight, Clock, X } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, Clock, Download, Trash2, X } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
+import { foreignFlag, isQualityRow, isVarietyRow, seedHealth } from "../lib/seedHealth";
 import {
   Badge,
   Button,
@@ -14,6 +15,7 @@ import {
   SectionHeader,
   Skeleton,
 } from "../components/ui";
+import DetectionCanvas from "../components/DetectionCanvas";
 import "./history.css";
 
 const PAGE_SIZE = 12;
@@ -30,6 +32,92 @@ const fmtDate = (iso) => {
   });
 };
 
+// A stored analysis keeps detections, classifications and assessments as separate
+// flat rows (one write per seed, per table). DetectionCanvas expects the shape a
+// live analysis returns instead — one object per seed with its own predictions
+// nested inline — so this rebuilds that shape by seed_index. No extra fetch: every
+// field here already came back with the row from GET /api/history.
+function buildDetectionSeeds(analysis) {
+  const classifications = analysis?.classifications || [];
+  const assessments = analysis?.assessments || [];
+  return (analysis?.detections || []).map((d) => {
+    const variety = classifications.find((c) => c.seed_index === d.seed_index && isVarietyRow(c));
+    const quality = classifications.find((c) => c.seed_index === d.seed_index && isQualityRow(c));
+    const assessment = assessments.find((a) => a.seed_index === d.seed_index);
+    return {
+      seed_index: d.seed_index,
+      bbox: d.bbox,
+      kernel_px: d.kernel_px,
+      detection_confidence: d.confidence,
+      variety_prediction: variety
+        ? {
+            predicted_class: variety.predicted_class,
+            confidence: variety.confidence,
+            confidence_calibrated: variety.confidence_calibrated,
+          }
+        : null,
+      quality_prediction: quality
+        ? {
+            predicted_class: quality.predicted_class,
+            confidence: quality.confidence,
+            confidence_calibrated: quality.confidence_calibrated,
+            out_of_distribution: !!quality.class_probabilities?._out_of_distribution,
+          }
+        : null,
+      foreign_object: assessment?.foreign_object_status
+        ? { status: assessment.foreign_object_status, basis: assessment.foreign_object_basis }
+        : null,
+    };
+  });
+}
+
+function SeedDetail({ seed }) {
+  if (!seed) return null;
+  const foreign = foreignFlag(seed);
+  if (foreign) {
+    return (
+      <div className="hcard__seeddetail">
+        <span className="hcard__seeddetaillabel">Seed {seed.seed_index + 1}</span>
+        <span className="hcard__seedforeign">
+          {foreign.label} — {foreign.reason}
+        </span>
+      </div>
+    );
+  }
+  const health = seedHealth(seed);
+  return (
+    <div className="hcard__seeddetail">
+      <span className="hcard__seeddetaillabel">Seed {seed.seed_index + 1}</span>
+      <div className="hcard__seedrow">
+        <span className="hcard__seedval">
+          {seed.variety_prediction ? pretty(seed.variety_prediction.predicted_class) : "No variety prediction"}
+        </span>
+        {seed.variety_prediction && (
+          <ConfidenceBar
+            value={seed.variety_prediction.confidence}
+            calibrated={seed.variety_prediction.confidence_calibrated}
+            showValue
+            label={null}
+          />
+        )}
+      </div>
+      {seed.quality_prediction && (
+        <div className="hcard__seedrow">
+          <span className={`hcard__seedval ${health.flagged ? "hcard__seedval--warn" : ""}`}>
+            {pretty(seed.quality_prediction.predicted_class)}
+          </span>
+          <ConfidenceBar
+            value={seed.quality_prediction.confidence}
+            calibrated={seed.quality_prediction.confidence_calibrated}
+            showValue
+            label={null}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function History() {
   const [rows, setRows] = useState([]);
   const [state, setState] = useState("loading");
@@ -38,6 +126,10 @@ export default function History() {
   const [query, setQuery] = useState("");
   const [variety, setVariety] = useState("all");
   const [selected, setSelected] = useState(null);
+  const [seedSel, setSeedSel] = useState(null);
+  const [deletePending, setDeletePending] = useState(null); // analysis_id awaiting confirmation
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,14 +156,29 @@ export default function History() {
     const set = new Set();
     rows.forEach((r) =>
       (r.classifications || [])
-        .filter((c) => !c.is_synthetic_model)
+        .filter(isVarietyRow)
         .forEach((c) => set.add(c.predicted_class))
     );
     return [...set].sort();
   }, [rows]);
 
+  const handleDelete = async (analysisId) => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.deleteAnalysis(analysisId);
+      setRows((prev) => prev.filter((r) => r.analysis_id !== analysisId));
+      setDeletePending(null);
+      if (selected === analysisId) setSelected(null);
+    } catch (e) {
+      setDeleteError(e.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const filtered = rows.filter((r) => {
-    const top = (r.classifications || []).find((c) => !c.is_synthetic_model);
+    const top = (r.classifications || []).find(isVarietyRow);
     if (variety !== "all" && top?.predicted_class !== variety) return false;
     if (query) {
       const hay = `${r.image_filename || ""} ${top?.predicted_class || ""}`.toLowerCase();
@@ -87,7 +194,7 @@ export default function History() {
         subtitle="Every analysis is persisted with its detections, class probabilities and the model that produced them."
       />
 
-      <GlassCard className="hi__filters">
+      <GlassCard tier="floating" className="hi__filters">
         <div className="hi__search">
           <Search size={15} />
           <input
@@ -138,7 +245,23 @@ export default function History() {
             Next <ChevronRight size={14} />
           </Button>
         </div>
+
+        {/* A plain download link, not a fetch call: the browser's own download
+            flow handles a CSV response exactly like any other file. */}
+        <a
+          className="btn btn--secondary btn--sm hi__export"
+          href={api.historyExportUrl()}
+          download="maize_analysis_history.csv"
+        >
+          <Download size={14} /> Export CSV
+        </a>
       </GlassCard>
+
+      {deleteError && (
+        <GlassCard accent="danger" className="hi__deleteerr">
+          <ErrorState title="Could not delete analysis" reason={deleteError} />
+        </GlassCard>
+      )}
 
       {state === "loading" && (
         <div className="hi__grid">
@@ -175,11 +298,13 @@ export default function History() {
       {state === "ready" && filtered.length > 0 && (
         <div className="hi__grid">
           {filtered.map((r, i) => {
-            const top = (r.classifications || []).find((c) => !c.is_synthetic_model);
+            const top = (r.classifications || []).find(isVarietyRow);
             const open = selected === r.analysis_id;
+            const detSeeds = open ? buildDetectionSeeds(r) : [];
             return (
               <motion.div
                 key={r.analysis_id}
+                className={`hi__cell ${open ? "is-open" : ""}`}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.3, delay: 0.03 * i }}
@@ -187,7 +312,10 @@ export default function History() {
                 <GlassCard
                   hover
                   className={`hcard ${open ? "is-open" : ""}`}
-                  onClick={() => setSelected(open ? null : r.analysis_id)}
+                  onClick={() => {
+                    setSelected(open ? null : r.analysis_id);
+                    setSeedSel(null);
+                  }}
                 >
                   <div className="hcard__img">
                     {r.image_path ? (
@@ -214,7 +342,12 @@ export default function History() {
                   {top ? (
                     <>
                       <span className="hcard__variety">{pretty(top.predicted_class)}</span>
-                      <ConfidenceBar value={top.confidence} showValue label={null} />
+                      <ConfidenceBar
+                        value={top.confidence}
+                        calibrated={top.confidence_calibrated}
+                        showValue
+                        label={null}
+                      />
                     </>
                   ) : (
                     <span className="hcard__variety faint">No variety prediction</span>
@@ -226,6 +359,7 @@ export default function History() {
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ duration: 0.25 }}
+                      onClick={(e) => e.stopPropagation()}
                     >
                       <span className="hcard__dl">Dataset {r.variety_dataset_used?.toUpperCase()}</span>
                       {(r.classifications || []).map((c, k) => (
@@ -235,6 +369,49 @@ export default function History() {
                         </div>
                       ))}
                       <span className="hcard__id mono faint">{r.analysis_id}</span>
+
+                      <div className="hcard__deletebar">
+                        {deletePending === r.analysis_id ? (
+                          <>
+                            <span className="hcard__deleteconfirm">
+                              Permanently delete this analysis and its stored results?
+                            </span>
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              onClick={() => handleDelete(r.analysis_id)}
+                              disabled={deleting}
+                            >
+                              {deleting ? "Deleting…" : "Confirm delete"}
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => setDeletePending(null)} disabled={deleting}>
+                              Cancel
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            icon={Trash2}
+                            onClick={() => setDeletePending(r.analysis_id)}
+                          >
+                            Delete this analysis
+                          </Button>
+                        )}
+                      </div>
+
+                      {detSeeds.length > 0 && r.image_path && (
+                        <div className="hcard__seeds-drilldown">
+                          <span className="hcard__dl">Seed detections</span>
+                          <DetectionCanvas
+                            src={mediaUrl(r.image_path)}
+                            seeds={detSeeds}
+                            selectedIndex={seedSel}
+                            onSelect={setSeedSel}
+                          />
+                          {seedSel != null && <SeedDetail seed={detSeeds[seedSel]} />}
+                        </div>
+                      )}
                     </motion.div>
                   )}
                 </GlassCard>

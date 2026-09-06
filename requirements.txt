@@ -22,8 +22,12 @@ uvicorn[standard]>=0.29
 pydantic>=2.7
 sqlalchemy>=2.0
 python-multipart>=0.0.9
-google-generativeai>=0.5
+google-genai>=1.0
 python-dotenv>=1.0
+
+# Reporting (src/analysis/render_report.py — renders docs/*.md to PDF via headless
+# Edge/Chrome, no native GTK/Cairo dependency)
+markdown>=3.6
 
 # Testing
 pytest>=8.2

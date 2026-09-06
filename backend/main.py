@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.config import CORS_ORIGINS, gemini_is_configured
-from backend.routes import analyze, detect, classify, similarity, history, copilot, media, stats, lot
+from backend.routes import analyze, detect, classify, similarity, history, copilot, media, stats, lot, orchestrate
+from backend.services.system_service import API_VERSION, system_report
 from src.utils.logging_utils import get_logger
 
 logger = get_logger("backend_main")
@@ -16,11 +17,13 @@ logger = get_logger("backend_main")
 app = FastAPI(
     title="Maize Seed Variety Recognition & Detection API",
     description=(
-        "See docs/04_FUNCTIONALITY_COVERAGE_MATRIX.md for exactly what this API does "
-        "and does not support. Quality/defect predictions are from a SYNTHETIC "
-        "demonstration model, not real-world pathology data."
+        "See docs/04_FUNCTIONALITY_COVERAGE_MATRIX.md, or GET /api/system-info for a "
+        "live report of the models actually loaded on this server, for exactly what "
+        "this API does and does not support. Quality grades come from real "
+        "expert-assigned Good/Bad labels; defect segmentation and severity are NOT "
+        "served, because the only trained segmenter learned painted defects."
     ),
-    version="0.1.0",
+    version=API_VERSION,
 )
 
 app.add_middleware(
@@ -29,6 +32,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Response headers a browser is allowed to READ cross-origin. Without this the
+    # Grad-CAM endpoint's "this is not a segmentation mask" note and its which-model
+    # /which-head fields are set but invisible to the frontend, which then has to
+    # guess what the image it is displaying actually explains.
+    expose_headers=[
+        "X-Explainability-Note", "X-Gradcam-Model", "X-Gradcam-Head",
+        "X-Gradcam-Target-Layer", "X-Gradcam-Predicted-Class", "X-Gradcam-Region",
+    ],
 )
 
 app.include_router(analyze.router)
@@ -40,6 +51,7 @@ app.include_router(copilot.router)
 app.include_router(media.router)
 app.include_router(stats.router)
 app.include_router(lot.router)
+app.include_router(orchestrate.router)
 
 
 @app.get("/api/health")
@@ -52,64 +64,14 @@ async def health():
 
 @app.get("/api/system-info")
 async def system_info():
-    """Phase 23 'Model/System Information' page data — never exposes secrets, only
-    which capabilities exist, matching docs/04_FUNCTIONALITY_COVERAGE_MATRIX.md."""
-    return {
-        "supported_capabilities": [
-            "maize seed detection & counting (single class: Corn)",
-            "individual seed cropping",
-            "variety classification across 6 varieties in one unified model, via "
-            "contrastive-pretrained cognitive-attention CNN",
-            "kernel quality grading (Good/Bad) from real expert-assigned labels, "
-            "97.25% test accuracy",
-            "out-of-distribution detection on quality grades — extrapolated grades "
-            "are marked unverified rather than reported as defects",
-            "seed-lot composition reporting: variety composition, off-type rate, "
-            "soundness (explicitly NOT a certification)",
-            "feature embeddings + FAISS visual similarity search",
-            "Grad-CAM explainability (not segmentation)",
-            "batch analysis, persistent history",
-            "Gemini-powered explanation/copilot over verified results",
-        ],
-        "explicitly_not_supported": [
-            "real-world fungal/insect/disease diagnosis — published kernel-level "
-            "detection relies on NIR/hyperspectral bands an RGB camera cannot see",
-            "defect type classification — the quality label is binary Good/Bad",
-            "defect severity scoring — the model outputs confidence, not severity",
-            "pixel-level segmentation or exact defect area — no dataset has masks",
-            "foreign-object detection — the detector has one class, Corn",
-            "certified seed-lot analysis — certification requires an accredited "
-            "laboratory and a prescribed sampling protocol",
-        ],
-        "gemini_configured": gemini_is_configured(),
-    }
+    """Live report of what this server can actually do right now.
 
-
-@app.get("/api/system-info")
-async def system_info():
-    """Phase 23 'Model/System Information' page data — never exposes secrets, only
-    which capabilities exist, matching docs/04_FUNCTIONALITY_COVERAGE_MATRIX.md."""
-    return {
-        "supported_capabilities": [
-            "maize seed detection & counting (single class: Corn)",
-            "individual seed cropping",
-            "variety classification (Dataset A: 3 classes; Dataset B: 3 classes) via "
-            "contrastive-pretrained, cognitive-attention CNN",
-            "feature embeddings + FAISS visual similarity search",
-            "Grad-CAM explainability (not segmentation)",
-            "synthetic defect-pattern classification (demonstration only, not real pathology)",
-            "batch analysis, persistent history",
-            "Gemini-powered explanation/copilot over verified results",
-        ],
-        "explicitly_not_supported": [
-            "real-world fungal/insect/disease diagnosis",
-            "defect severity scoring",
-            "pixel-level segmentation or exact defect area",
-            "foreign-object detection",
-            "purity / certified seed-lot analysis",
-        ],
-        "gemini_configured": gemini_is_configured(),
-    }
+    Read from disk on every request -- checkpoints, evaluation JSON, FAISS index
+    sidecars, the database, the CUDA runtime -- so a retrained or missing model
+    changes the page instead of the page describing a model that is gone. Never
+    exposes secrets: the Gemini section reports configured/not and the model name.
+    """
+    return system_report()
 
 
 @app.exception_handler(Exception)

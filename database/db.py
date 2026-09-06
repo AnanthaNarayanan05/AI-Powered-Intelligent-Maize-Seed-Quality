@@ -35,8 +35,34 @@ def _apply_additive_migrations(engine) -> None:
     """
     from sqlalchemy import inspect, text
 
+    # Phase 9 widened three existing tables, Phase 5 a fourth. Every entry is nullable with no
+    # default, so rows written before the column existed read back as NULL --
+    # which is the honest value: nobody measured that kernel's pixel width, and
+    # backfilling one now would be inventing it.
     additive = {
-        "analyses": {"image_path": "VARCHAR"},
+        "analyses": {
+            "image_path": "VARCHAR",
+            "analysis_stage": "VARCHAR",
+            "intent": "VARCHAR",
+            "stages": "JSON",
+            "model_versions": "JSON",
+            "segmentation_status": "JSON",
+        },
+        "detections": {"kernel_px": "INTEGER"},
+        "classifications": {"model_version": "VARCHAR", "confidence_calibrated": "BOOLEAN"},
+        # Phase 5. Null on every row written before the visible-symptom capability
+        # existed, which is the honest value: those kernels were never scored for
+        # it, and a backfill would be inventing verdicts.
+        "seed_assessments": {
+            "symptom_status": "VARCHAR",
+            "symptom_reason": "VARCHAR",
+            "symptom_class": "VARCHAR",
+            "symptom_confidence": "FLOAT",
+            "symptom_argmax_class": "VARCHAR",
+            "symptom_argmax_confidence": "FLOAT",
+            "symptom_threshold": "FLOAT",
+            "symptom_model": "VARCHAR",
+        },
     }
 
     inspector = inspect(engine)

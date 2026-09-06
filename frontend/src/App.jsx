@@ -8,22 +8,27 @@ import Copilot from "./pages/Copilot";
 import Compare from "./pages/Compare";
 import Lot from "./pages/Lot";
 import SystemInfo from "./pages/SystemInfo";
+import Settings from "./pages/Settings";
+import { SettingsProvider } from "./lib/settings";
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/analyze" element={<Analyze />} />
-          <Route path="/batch" element={<Batch />} />
-          <Route path="/history" element={<History />} />
-          <Route path="/copilot" element={<Copilot />} />
-          <Route path="/compare" element={<Compare />} />
-          <Route path="/lot" element={<Lot />} />
-          <Route path="/system" element={<SystemInfo />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <SettingsProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/analyze" element={<Analyze />} />
+            <Route path="/batch" element={<Batch />} />
+            <Route path="/history" element={<History />} />
+            <Route path="/copilot" element={<Copilot />} />
+            <Route path="/compare" element={<Compare />} />
+            <Route path="/lot" element={<Lot />} />
+            <Route path="/system" element={<SystemInfo />} />
+            <Route path="/settings" element={<Settings />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </SettingsProvider>
   );
 }

@@ -242,6 +242,18 @@
   max-height: 420px;
   display: block;
 }
+/* Provenance caption under the heatmap: which model, head, layer and region the
+   overlay actually explains, plus the "not a segmentation mask" note. */
+.an__explaincap {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--ink-muted);
+  text-align: center;
+  border-top: 1px solid var(--glass-border);
+  width: 100%;
+}
 
 /* ---------- similarity ---------- */
 .simstrip {
@@ -358,4 +370,78 @@
   font-size: var(--text-sm);
   color: var(--ink-muted);
   line-height: 1.55;
+}
+
+/* A gallery neighbour whose source dataset never carried a variety label. Rendered
+   as absent rather than blank so it cannot be misread as a real class name. */
+.simcard__label--none {
+  font-style: italic;
+  text-transform: none;
+  opacity: 0.65;
+}
+
+/* Phase 8 — the resolution gate's own panel. Deliberately plain: it reports a
+   measurement and an unavailable state, and dressing that up would be the wrong
+   signal. */
+.an__seg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.an__segstats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--sp-3);
+  margin: 0;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--glass-border);
+}
+.an__segstats dt {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-faint);
+}
+.an__segstats dd {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink);
+}
+.an__segseed {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+/* Visible-symptom tallies. Named categories and withheld counts share a row so
+   they are read together, but never share a treatment: the withheld chips are
+   deliberately quieter and outlined rather than filled, because they report an
+   absence of a verdict and must not carry the visual weight of a finding. */
+.an__symptomcounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+.an__symptomchip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+}
+
+.an__symptomchip b {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.an__symptomchip--withheld {
+  background: transparent;
+  opacity: 0.72;
+  border-style: dashed;
 }
