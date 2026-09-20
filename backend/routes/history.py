@@ -11,8 +11,16 @@ router = APIRouter(prefix="/api", tags=["history"])
 
 
 @router.get("/history")
-async def history(limit: int = Query(20, le=100), offset: int = Query(0, ge=0)):
-    return {"analyses": list_analyses(limit=limit, offset=offset), "limit": limit, "offset": offset}
+async def history(
+    limit: int = Query(20, le=100),
+    offset: int = Query(0, ge=0),
+    health_threshold: float | None = Query(default=None, ge=0.40, le=0.90),
+):
+    return {
+        "analyses": list_analyses(limit=limit, offset=offset, health_threshold=health_threshold),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 # Declared before /history/{analysis_id} -- FastAPI matches routes in order, and
@@ -28,8 +36,11 @@ async def history_export():
 
 
 @router.get("/history/{analysis_id}")
-async def history_detail(analysis_id: str):
-    result = get_analysis(analysis_id)
+async def history_detail(
+    analysis_id: str,
+    health_threshold: float | None = Query(default=None, ge=0.40, le=0.90),
+):
+    result = get_analysis(analysis_id, health_threshold=health_threshold)
     if result is None:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return result

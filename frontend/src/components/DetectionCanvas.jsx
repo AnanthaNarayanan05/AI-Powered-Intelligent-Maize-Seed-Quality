@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Eye, EyeOff, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
 import { seedHealth, foreignFlag } from "../lib/seedHealth";
+import { useSettings } from "../lib/settings";
 import "./detectioncanvas.css";
 
 export default function DetectionCanvas({
@@ -22,6 +23,8 @@ export default function DetectionCanvas({
   const [showBoxes, setShowBoxes] = useState(true);
   const [zoom, setZoom] = useState(1);
   const imgRef = useRef(null);
+  const { settings } = useSettings();
+  const { healthThreshold } = settings;
 
   // If the image is cached the load event can fire before this mounts.
   useEffect(() => {
@@ -99,7 +102,7 @@ export default function DetectionCanvas({
               const box = pct(seed);
               if (!box) return null;
               const active = selectedIndex === i;
-              const health = seedHealth(seed);
+              const health = seedHealth(seed, healthThreshold);
               // A possible foreign object supersedes the health marker: grading
               // the soundness of something that may not be a kernel is not a
               // result, and showing both invites the reader to merge them.

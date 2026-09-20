@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { Search, ChevronLeft, ChevronRight, Clock, Download, Trash2, X } from "lucide-react";
 import { api, mediaUrl } from "../api/client";
 import { foreignFlag, isQualityRow, isVarietyRow, seedHealth } from "../lib/seedHealth";
+import { useSettings } from "../lib/settings";
 import {
   Badge,
   Button,
@@ -62,6 +63,11 @@ function buildDetectionSeeds(analysis) {
             confidence: quality.confidence,
             confidence_calibrated: quality.confidence_calibrated,
             out_of_distribution: !!quality.class_probabilities?._out_of_distribution,
+            class_probabilities: quality.class_probabilities,
+            // Threshold-adjusted verdict, computed server-side when the fetch
+            // included health_threshold. Falls back to null (and from there to
+            // client-side computation in seedHealth.js) when it did not.
+            effective_class: quality.effective_class ?? null,
           }
         : null,
       foreign_object: assessment?.foreign_object_status
@@ -72,6 +78,7 @@ function buildDetectionSeeds(analysis) {
 }
 
 function SeedDetail({ seed }) {
+  const { settings } = useSettings();
   if (!seed) return null;
   const foreign = foreignFlag(seed);
   if (foreign) {
@@ -84,7 +91,7 @@ function SeedDetail({ seed }) {
       </div>
     );
   }
-  const health = seedHealth(seed);
+  const health = seedHealth(seed, settings.healthThreshold);
   return (
     <div className="hcard__seeddetail">
       <span className="hcard__seeddetaillabel">Seed {seed.seed_index + 1}</span>
@@ -104,7 +111,7 @@ function SeedDetail({ seed }) {
       {seed.quality_prediction && (
         <div className="hcard__seedrow">
           <span className={`hcard__seedval ${health.flagged ? "hcard__seedval--warn" : ""}`}>
-            {pretty(seed.quality_prediction.predicted_class)}
+            {pretty(seed.quality_prediction.effective_class ?? seed.quality_prediction.predicted_class)}
           </span>
           <ConfidenceBar
             value={seed.quality_prediction.confidence}
@@ -119,6 +126,7 @@ function SeedDetail({ seed }) {
 }
 
 export default function History() {
+  const { settings } = useSettings();
   const [rows, setRows] = useState([]);
   const [state, setState] = useState("loading");
   const [error, setError] = useState(null);
@@ -135,8 +143,10 @@ export default function History() {
     let cancelled = false;
     setState("loading");
     // Paginated server-side so a large history is never pulled into the browser.
+    // health_threshold is re-sent whenever it changes so effective_class stays in
+    // sync with the Settings slider without a manual refresh.
     api
-      .history(PAGE_SIZE, page * PAGE_SIZE)
+      .history(PAGE_SIZE, page * PAGE_SIZE, settings.healthThreshold)
       .then((d) => {
         if (cancelled) return;
         setRows(d.analyses || []);
@@ -150,7 +160,7 @@ export default function History() {
     return () => {
       cancelled = true;
     };
-  }, [page]);
+  }, [page, settings.healthThreshold]);
 
   const varieties = useMemo(() => {
     const set = new Set();

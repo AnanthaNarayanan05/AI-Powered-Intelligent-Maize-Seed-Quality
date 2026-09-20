@@ -31,6 +31,10 @@ export const DEFAULTS = Object.freeze({
   glass: "balanced",
   density: "comfortable",
   motion: "system",
+  // Analysis sensitivity — matches HEALTH_THRESHOLD in src/lib/seedHealth.js;
+  // that file's own constant stays as the fallback for any caller that does not
+  // read this setting.
+  healthThreshold: 0.65,
 });
 
 const ALLOWED = {
@@ -39,6 +43,8 @@ const ALLOWED = {
   glass: ["subtle", "balanced", "strong"],
   density: ["comfortable", "compact"],
   motion: ["system", "reduced"],
+  healthThreshold: (v) =>
+    typeof v === "number" && v >= 0.40 && v <= 0.90,
 };
 
 /* A stored value that is no longer offered — a route that was renamed, an option
@@ -52,6 +58,8 @@ function coerce(raw) {
     if (value === undefined) continue;
     if (typeof DEFAULTS[key] === "boolean") {
       if (typeof value === "boolean") out[key] = value;
+    } else if (typeof ALLOWED[key] === "function") {
+      if (ALLOWED[key](value)) out[key] = value;
     } else if (ALLOWED[key]?.includes(value)) {
       out[key] = value;
     }

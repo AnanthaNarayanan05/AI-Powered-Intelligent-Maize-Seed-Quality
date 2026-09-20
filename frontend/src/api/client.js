@@ -97,10 +97,16 @@ export const api = {
     };
   },
 
-  history: (limit = 20, offset = 0) =>
-    fetch(`${BASE_URL}/api/history?limit=${limit}&offset=${offset}`).then(handle),
+  history: (limit = 20, offset = 0, healthThreshold = null) => {
+    const params = new URLSearchParams({ limit, offset });
+    if (healthThreshold != null) params.set("health_threshold", healthThreshold);
+    return fetch(`${BASE_URL}/api/history?${params}`).then(handle);
+  },
 
-  historyDetail: (analysisId) => fetch(`${BASE_URL}/api/history/${analysisId}`).then(handle),
+  historyDetail: (analysisId, healthThreshold = null) => {
+    const qs = healthThreshold != null ? `?health_threshold=${healthThreshold}` : "";
+    return fetch(`${BASE_URL}/api/history/${analysisId}${qs}`).then(handle);
+  },
 
   batchDetail: (batchId) => fetch(`${BASE_URL}/api/history/batch/${batchId}`).then(handle),
 
@@ -148,7 +154,7 @@ export const api = {
       body: JSON.stringify({ batch_id: batchId }),
     }).then(handle),
 
-  lotReport: (analysisIds, declaredVariety = null, lotReference = null) =>
+  lotReport: (analysisIds, declaredVariety = null, lotReference = null, healthThreshold = null) =>
     fetch(`${BASE_URL}/api/lot/report`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -156,6 +162,7 @@ export const api = {
         analysis_ids: analysisIds,
         declared_variety: declaredVariety,
         lot_reference: lotReference,
+        health_threshold: healthThreshold,
       }),
     }).then(handle),
 
