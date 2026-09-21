@@ -67,6 +67,12 @@ const MOTION = [
   { value: "reduced", label: "Reduced", hint: "Suppresses animation here" },
 ];
 
+const HEALTH_PRESETS = [
+  { value: 0.5, label: "Lenient" },
+  { value: 0.65, label: "Balanced" },
+  { value: 0.8, label: "Strict" },
+];
+
 /* Settings the platform deliberately does not offer. Listed rather than omitted
    silently: an operator looking for one of these deserves to know it is absent by
    decision and why, instead of hunting for a control that was never built. */
@@ -131,6 +137,26 @@ function Segmented({ name, options, value, onChange }) {
         </label>
       ))}
     </div>
+  );
+}
+
+/* A native range input rather than a custom drag surface: it already carries
+   keyboard stepping, screen-reader value announcement and touch dragging for
+   free, and this page has no other control that needs to reimplement those.
+   Styled with the accent-color property alone so no rule is added to
+   settings.css. */
+function Slider({ id, value, min, max, step, onChange }) {
+  return (
+    <input
+      id={id}
+      type="range"
+      min={min}
+      max={max}
+      step={step}
+      value={value}
+      onChange={(e) => onChange(parseFloat(e.target.value))}
+      style={{ accentColor: "var(--gold)", width: "12rem" }}
+    />
   );
 }
 
@@ -343,6 +369,45 @@ export default function Settings() {
               value={settings.motion}
               onChange={(v) => put("motion", v)}
             />
+          </Row>
+        </GlassCard>
+
+        <GlassCard tier="primary" className="set__panel set__panel--wide">
+          <h3 className="set__panelhead">
+            <SlidersHorizontal size={16} aria-hidden="true" /> Analysis Sensitivity
+          </h3>
+
+          <Row
+            label="Seed Health Verdict Threshold"
+            htmlFor="set-health-threshold"
+            help="Kernels graded Good with a Good-probability below this level are shown as Bad instead, in Analyze, History and the Lot report. This is a second, threshold-adjusted verdict computed from the model's own probabilities — the model's original prediction is never overwritten or discarded."
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)" }}>
+              <Slider
+                id="set-health-threshold"
+                value={settings.healthThreshold}
+                min={0.4}
+                max={0.9}
+                step={0.05}
+                onChange={(v) => put("healthThreshold", v)}
+              />
+              <span className="mono">{Math.round(settings.healthThreshold * 100)}%</span>
+            </div>
+          </Row>
+
+          <Row label="Presets">
+            <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+              {HEALTH_PRESETS.map((p) => (
+                <Button
+                  key={p.label}
+                  variant={settings.healthThreshold === p.value ? "primary" : "ghost"}
+                  size="sm"
+                  onClick={() => put("healthThreshold", p.value)}
+                >
+                  {p.label}
+                </Button>
+              ))}
+            </div>
           </Row>
         </GlassCard>
       </div>

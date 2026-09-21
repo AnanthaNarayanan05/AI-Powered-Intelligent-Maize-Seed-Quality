@@ -19,6 +19,7 @@ import { useSettings } from "../lib/settings";
 import {
   foreignFlag,
   foreignUnavailable,
+  qualityEffectiveClass,
   symptomTally,
   symptomVerdict,
   WITHHELD_REASONS,
@@ -533,15 +534,28 @@ export default function Analyze() {
                         </div>
                         {active.quality_prediction ? (
                           <>
-                            <h3
-                              className={`an__predict ${
-                                /^(bad|defect)/i.test(active.quality_prediction.predicted_class)
-                                  ? "an__predict--warn"
-                                  : ""
-                              }`}
-                            >
-                              {pretty(active.quality_prediction.predicted_class)}
-                            </h3>
+                            {(() => {
+                              // Live analysis never round-trips through the backend's
+                              // health_threshold query param, so the threshold-adjusted
+                              // verdict is derived here from the same class_probabilities
+                              // history_service._effective_quality_class reads server-side.
+                              // predicted_class above is untouched either way.
+                              const effectiveClass = qualityEffectiveClass(
+                                active.quality_prediction,
+                                settings.healthThreshold
+                              );
+                              return (
+                                <h3
+                                  className={`an__predict ${
+                                    /^(bad|defect)/i.test(effectiveClass || "")
+                                      ? "an__predict--warn"
+                                      : ""
+                                  }`}
+                                >
+                                  {pretty(effectiveClass)}
+                                </h3>
+                              );
+                            })()}
                             <ConfidenceBar
                               value={active.quality_prediction.confidence}
                               calibrated={active.quality_prediction.confidence_calibrated}

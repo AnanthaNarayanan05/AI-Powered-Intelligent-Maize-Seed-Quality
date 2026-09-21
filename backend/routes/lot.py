@@ -51,6 +51,13 @@ class LotRequest(BaseModel):
                     "majority, which is what a purity check actually means.",
     )
     lot_reference: str | None = None
+    health_threshold: float | None = Field(
+        None, ge=0.40, le=0.90,
+        description="Optional. When given, kernel soundness is bucketed by the "
+                    "threshold-adjusted verdict computed from stored class "
+                    "probabilities, not by the raw model prediction. OOD grades "
+                    "are still excluded, never re-thresholded.",
+    )
 
 
 def _shannon_evenness(counts: list[int]) -> float | None:
@@ -104,7 +111,15 @@ async def lot_report(req: LotRequest):
                         quality_ood += 1
                         continue
                     seeds_with_quality += 1
-                    quality_counts[c.predicted_class] = quality_counts.get(c.predicted_class, 0) + 1
+                    # Threshold-adjusted verdict, computed here rather than stored:
+                    # predicted_class stays what the model said, this is a second
+                    # figure derived at query time from the same class_probabilities.
+                    effective_class = c.predicted_class
+                    if req.health_threshold is not None:
+                        p_good = (c.class_probabilities or {}).get("Good")
+                        if p_good is not None:
+                            effective_class = "Good" if p_good >= req.health_threshold else "Bad"
+                    quality_counts[effective_class] = quality_counts.get(effective_class, 0) + 1
                 else:
                     seeds_with_variety += 1
                     variety_counts[c.predicted_class] = variety_counts.get(c.predicted_class, 0) + 1

@@ -23,20 +23,44 @@ export const HEALTH_THRESHOLD = 0.65;
 // Class names a quality model may use for the defective side of the split.
 const UNHEALTHY = /^(bad|defect|defective|damaged|unhealthy|poor|rotten|broken|discoloured|discolored)/i;
 
+/* Threshold-adjusted verdict for a quality prediction, derived from the same
+   class_probabilities the backend derives it from (see
+   history_service._effective_quality_class and routes/lot.py's bucketing loop).
+   predicted_class is never touched by this -- it stays what the model said.
+
+   When the object already carries a server-computed `effective_class` (History,
+   fetched with health_threshold as a query param), that value wins outright, so
+   there is exactly one number in play rather than two that could disagree. It is
+   computed here only as a fallback, for the live-analysis view: that response
+   comes straight from the pipeline and never round-trips through the backend's
+   threshold parameter. OOD rows are never re-evaluated either way. */
+export function qualityEffectiveClass(q, threshold) {
+  if (!q) return null;
+  if (q.effective_class) return q.effective_class;
+  if (q.out_of_distribution) return q.predicted_class;
+  if (threshold == null) return q.predicted_class;
+  const pGood =
+    q.class_probabilities?.Good ??
+    (q.predicted_class === "Good" ? q.confidence ?? 0 : 1 - (q.confidence ?? 0));
+  return pGood >= threshold ? "Good" : "Bad";
+}
+
 export function seedHealth(seed, threshold = HEALTH_THRESHOLD) {
   const q = seed?.quality_prediction;
 
   if (q && !q.is_synthetic_model && q.predicted_class) {
     const bad = UNHEALTHY.test(q.predicted_class);
     // Score is "probability this kernel is sound": the model's own confidence
-    // when it says good, its complement when it says bad.
+    // when it says good, its complement when it says bad. This does not depend
+    // on the threshold -- it is the same P(Good) the threshold is compared
+    // against, not the outcome of that comparison.
     const score = bad ? 1 - (q.confidence ?? 0) : q.confidence ?? 0;
 
     // A grade produced for a kernel unlike anything the quality head was validated
     // on is an extrapolation. It still gets marked, because a possible defect is
     // worth a human look, but it is marked as UNVERIFIED rather than as a defect --
     // the platform must not present a guess in the same visual language as a
-    // measurement.
+    // measurement. Never re-evaluated against the threshold.
     if (q.out_of_distribution) {
       return {
         flagged: bad,
@@ -50,13 +74,19 @@ export function seedHealth(seed, threshold = HEALTH_THRESHOLD) {
       };
     }
 
+    const effectiveClass = qualityEffectiveClass(q, threshold);
+    const flaggedBad = UNHEALTHY.test(effectiveClass || "");
+
     return {
-      flagged: bad || score < threshold,
+      flagged: flaggedBad || score < threshold,
       score,
       source: "quality",
       verified: true,
-      reason: bad
-        ? `Classified ${q.predicted_class} (${((q.confidence ?? 0) * 100).toFixed(0)}% confidence)`
+      effectiveClass,
+      reason: flaggedBad
+        ? `Classified ${effectiveClass}${
+            effectiveClass !== q.predicted_class ? ` — model said ${q.predicted_class}` : ""
+          } (${((q.confidence ?? 0) * 100).toFixed(0)}% confidence)`
         : `Sound kernel, but only ${(score * 100).toFixed(0)}% confidence`,
     };
   }

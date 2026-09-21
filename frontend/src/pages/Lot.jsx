@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { ClipboardList, Sprout, ShieldAlert, Info } from "lucide-react";
 import { api } from "../api/client";
 import { isVarietyRow } from "../lib/seedHealth";
+import { useSettings } from "../lib/settings";
 import {
   Badge,
   Button,
@@ -18,6 +19,7 @@ import "./lot.css";
 const pretty = (s) => (s ? s.replace(/_/g, " ") : "—");
 
 export default function Lot() {
+  const { settings } = useSettings();
   const [analyses, setAnalyses] = useState([]);
   const [listState, setListState] = useState("loading");
   const [listError, setListError] = useState(null);
@@ -73,7 +75,8 @@ export default function Lot() {
       const r = await api.lotReport(
         [...selected],
         declared.trim() || null,
-        lotRef.trim() || null
+        lotRef.trim() || null,
+        settings.healthThreshold
       );
       setReport({ state: "ready", data: r });
     } catch (e) {

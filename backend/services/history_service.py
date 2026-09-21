@@ -310,25 +310,47 @@ def save_analysis_result(result: dict, variety_dataset: str, image_filename: str
         return analysis.id
 
 
-def get_analysis(analysis_id: str) -> dict | None:
+def get_analysis(analysis_id: str, health_threshold: float | None = None) -> dict | None:
     with session_scope() as db:
         analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
         if analysis is None:
             return None
-        return _serialize_analysis(analysis)
+        return _serialize_analysis(analysis, health_threshold)
 
 
-def list_analyses(limit: int = 20, offset: int = 0) -> list[dict]:
+def list_analyses(limit: int = 20, offset: int = 0, health_threshold: float | None = None) -> list[dict]:
     with session_scope() as db:
         rows = (
             db.query(Analysis)
             .order_by(Analysis.created_at.desc())
             .offset(offset).limit(limit).all()
         )
-        return [_serialize_analysis(a) for a in rows]
+        return [_serialize_analysis(a, health_threshold) for a in rows]
 
 
-def _serialize_analysis(analysis: Analysis) -> dict:
+def _effective_quality_class(c: Classification, health_threshold: float | None) -> str | None:
+    """Threshold-adjusted verdict for a quality row, computed at query time from
+    the stored class_probabilities. predicted_class is never touched -- this is a
+    second, optional figure derived from the same numbers. None when no threshold
+    was asked for, or when the row is not a quality row.
+
+    OOD rows are left exactly as the model said: a grade produced for a kernel
+    outside the quality head's validated distribution is an extrapolation, and
+    re-thresholding it would dress up a guess as a measurement.
+    """
+    if health_threshold is None or not _is_quality_row(c):
+        return None
+    probs = c.class_probabilities or {}
+    if probs.get("_out_of_distribution"):
+        return c.predicted_class
+    p_good = probs.get(
+        "Good",
+        c.confidence if c.predicted_class == "Good" else 1 - (c.confidence or 0),
+    )
+    return "Good" if p_good >= health_threshold else "Bad"
+
+
+def _serialize_analysis(analysis: Analysis, health_threshold: float | None = None) -> dict:
     return {
         "analysis_id": analysis.id,
         "created_at": _iso_utc(analysis.created_at),
@@ -358,6 +380,7 @@ def _serialize_analysis(analysis: Analysis) -> dict:
                 # row from before calibration existed must keep reading as
                 # "never measured", the same distinction the column itself keeps.
                 "confidence_calibrated": c.confidence_calibrated,
+                "effective_class": _effective_quality_class(c, health_threshold),
             }
             for c in analysis.classifications
         ],
